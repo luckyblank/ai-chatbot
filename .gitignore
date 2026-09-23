@@ -1,0 +1,12 @@
+.idea/
+.vscode/
+**/node_modules/
+**/dist/
+**/target/
+**/.env
+**/.env.*
+!**/.env.example
+runtime-data/
+**/runtime-data/
+*.log
+
