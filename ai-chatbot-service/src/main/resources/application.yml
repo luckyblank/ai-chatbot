@@ -1,6 +1,6 @@
 spring:
   application:
-    name: enterprise-customer-service
+    name: ai-chatbot
   ai:
     ollama:
       base-url: http://localhost:11434 # ollama服务地址， 这就是默认值
@@ -19,7 +19,7 @@ spring:
           model: text-embedding-v4
           dimensions: 1024
   datasource:
-    url: ${DB_URL:jdbc:mysql://localhost:3306/ai-demo?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8}
+    url: ${DB_URL:jdbc:mysql://localhost:3306/ai_chatbot?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8}
     password: ${DB_PASSWORD:123456}
     username: ${DB_USERNAME:root}
   servlet:

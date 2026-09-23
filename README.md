@@ -11,19 +11,21 @@
 
 > 默认账号用于本地首次体验。正式使用前请通过环境变量修改账号和密码。
 
-### Docker Compose 本机演示
+### Docker Compose 本地部署
 
-Docker Desktop 已启动时，可使用独立项目名 `heima-ai-chatbot-a1-demo` 启动 MySQL、后端和 Web：
+Docker Desktop 已启动时，可使用项目名 `ai-chatbot` 启动 MySQL、后端和 Web：
 
 ```powershell
-Copy-Item .env.example .env
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 # 编辑 .env，至少替换数据库、Root 和管理员密码；真实 .env 不会进入 Git。
-docker compose -f compose.demo.yml config
-docker compose -f compose.demo.yml up -d --build
-docker compose -f compose.demo.yml ps
+docker compose -f compose.yaml config
+docker compose -f compose.yaml up -d --build
+docker compose -f compose.yaml ps
 ```
 
-访问 `http://localhost:15173`。这是全新环境的默认端口；如果本机已有服务占用该端口，可在 `.env` 中设置 `DEMO_WEB_PORT`、`DEMO_BACKEND_PORT` 和 `DEMO_MYSQL_PORT` 后再启动。默认只绑定 `127.0.0.1`，不会发布到局域网；Compose 文件使用唯一项目名，避免碰触其他 Docker 项目的容器、网络和卷。不要使用 `down`、`prune`、`rm` 或 `rmi` 清理用户已有资源。
+访问 `http://localhost:15175`。Web、后端和 MySQL 的固定默认宿主端口分别为 `15175`、`18082`、`13318`；只有主动修改 `.env` 中的 `SERVICE_WEB_PORT`、`SERVICE_BACKEND_PORT`、`SERVICE_MYSQL_PORT` 才会变化。默认只绑定 `127.0.0.1`，不会发布到局域网；三个容器默认命名为 `ai-chatbot-mysql`、`ai-chatbot-backend`、`ai-chatbot-web`。不要使用 `down`、`prune`、`rm` 或 `rmi` 清理用户已有资源。
+
+如果已有旧版 `.env`，请将其中的 `DEMO_*` 键逐一改为对应的 `SERVICE_*` 键，并保留原数据库名、密码和端口值。新环境的默认库名是 `ai_chatbot`；这不会自动重命名或复制旧数据库。复用旧数据卷时设置 `SERVICE_EXISTING_VOLUMES=true` 和两个旧卷名，且必须使用旧库实际的数据库名和有效凭据；不要让两个 MySQL 容器同时挂载同一个数据卷。迁移细节见[技术部署与维护](docs/技术部署与维护.md)。
 
 `AI_ENABLED=false` 时仍可运行不依赖模型的“售后订单审批演示”工作流；要演示真实客服对话和模型准备草案，在本机环境中显式设置 `AI_ENABLED=true` 与 `AI_DASHSCOPE_API_KEY`。完整验收记录见 [客服 Agent 可靠业务闭环 A 实施记录](docs/客服Agent可靠业务闭环-A实施记录.md)。
 

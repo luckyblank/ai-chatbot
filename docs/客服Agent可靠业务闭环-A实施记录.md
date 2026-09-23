@@ -96,11 +96,11 @@ SELECT PendingAction FOR UPDATE
 
 ### 6. Docker 演示交付
 
-- 根目录 `compose.demo.yml`：MySQL 8.0.45、Spring Boot 后端、Nginx/Vue Web；项目名固定为 `heima-ai-chatbot-a1-demo`。
+- 根目录 `compose.yaml`：MySQL 8.0.45、Spring Boot 后端、Nginx/Vue Web；当前默认项目名为 `ai-chatbot`。下文旧栈名称是当时的验收事实。
 - `ai-chatbot-service/Dockerfile`：Maven/Temurin 17 多阶段构建，JRE 17 非 root 运行。
 - `ai-chatbot-web/Dockerfile` 与 `docker/nginx.conf`：Node 22 构建、Nginx SPA fallback、同源 `/api` 反向代理、SSE 禁用代理缓冲。
 - `.env.example` 只有占位值，真实 `.env` 被 Git 忽略。数据库、Root 与管理员密码为 Compose 必填项。
-- 所有宿主端口默认绑定 `127.0.0.1`；本机 HTTP 演示的 Cookie Secure 为 false，HTTPS 部署可通过 `DEMO_COOKIE_SECURE=true` 开启。
+- 所有宿主端口默认绑定 `127.0.0.1`；本机 HTTP 部署的 Cookie Secure 为 false，HTTPS 部署可通过 `SERVICE_COOKIE_SECURE=true` 开启。
 
 本次操作没有执行 `docker down`、`rm`、`rmi`、`network rm` 或 `prune`，没有删除用户已有镜像、容器、网络或卷。验证过程使用不同 Compose 项目名只新增资源。
 
@@ -175,23 +175,25 @@ SELECT PendingAction FOR UPDATE
 
 在 Docker Compose 环境中完成过以下操作：
 
-- **最终 release 栈（待提交当前源码）**：以新项目 `heima-ai-chatbot-a1-release` 启动在 `127.0.0.1:15175/18082/13318`，mysql/backend/web 三个容器均为 healthy；此前所有栈继续保留，未删除或替换。真实模型会话 `d114bf26-f236-4a1e-8783-e6fbcdbb8e8b` 准备动作 `80e6e54f-5e05-3dbd-ac96-233a42df970c`；确认得到工单 `TK10FDF2EC37D940978DA8`，重复确认返回相同编号。数据库复核为 `action_status=SUCCEEDED`、`ticket_rows=1`、`confirmed_audits=1`。
+- **原 release 验收栈（历史记录，现源码已提交）**：以项目 `heima-ai-chatbot-a1-release` 启动在 `127.0.0.1:15175/18082/13318`，当时 mysql/backend/web 三个容器均为 healthy；此前所有栈继续保留，未删除或替换。真实模型会话 `d114bf26-f236-4a1e-8783-e6fbcdbb8e8b` 准备动作 `80e6e54f-5e05-3dbd-ac96-233a42df970c`；确认得到工单 `TK10FDF2EC37D940978DA8`，重复确认返回相同编号。数据库复核为 `action_status=SUCCEEDED`、`ticket_rows=1`、`confirmed_audits=1`。
 - **最终 release 栈的固定工作流**：运行 `20ee898a-ab7c-4d17-a19d-2f235b9ad8c6` 从订单查询、嵌套状态条件进入 waiting，经独立审批接口恢复并完成为 `terminal-completed`；共 5 个步骤，持久化输出中的订单状态为“已完成”。
 - **最终 release 栈的缺字段实模验证**：会话 `6a7532cf-16e1-4614-a342-70ef7d0f21b4` 未提供客户号和订单号；模型明确拒绝猜测或代填并逐项追问，随后独立 `GET /pending-actions` 返回 `[]`，没有准备或执行任何动作。
 
 - **前一验收栈（保留的重启证据）**：项目 `heima-ai-chatbot-a1-demo` 位于 `127.0.0.1:15174/18081/13317`。运行 `e00c7734-3a9c-4403-80c3-673326f11fb8` 在 backend 重启后从 waiting 恢复并完成为 `terminal-completed`；会话 `2ee89bda-9653-4f21-a205-53e31df8ad8` 的动作确认得到工单 `TK8740CEF4A1E74A139072`，无 CSRF Header 的重复确认返回 HTTP 403。
 
-- **前序验证栈（仅保留证据，不是最终演示入口）**：示例工作流运行 `20cbaa23-b8af-430f-a613-3d124cfbb29a` 跨 backend 重启后完成；真实模型会话 `b62e83b3-f046-4eac-a97a-fdfcd88f30f3` 的动作 `45aa06fb-3969-3be9-94f0-e2787e829134` 确认得到工单 `TK8137ECB725484C63A89A`。该栈因“只新增、不删除”约束继续运行在旧端口，但不作为当前源码的最终入口。
+- **前序验证栈（仅保留历史证据，不是当前入口）**：示例工作流运行 `20cbaa23-b8af-430f-a613-3d124cfbb29a` 跨 backend 重启后完成；真实模型会话 `b62e83b3-f046-4eac-a97a-fdfcd88f30f3` 的动作 `45aa06fb-3969-3be9-94f0-e2787e829134` 确认得到工单 `TK8137ECB725484C63A89A`。当时为遵守“只新增、不删除”约束而保留该栈；它当前已不在 Docker Desktop 项目列表中。
 - UI 已实际打开并操作会话中心草案卡与工作流审批。客服悬浮窗也已接入相同卡片与状态恢复，并由 3 条前端接线测试覆盖；流式 `complete` 只承载回答、引用和追溯，PendingAction 始终在流结束后通过独立 GET 查询对账。
 
 上述 ID 只属于隔离演示数据，不代表生产业务。没有触发退款、通知或第三方写操作。
 
 ## 5 分钟演示脚本
 
+下述“现场准备新草案”环节要求 `AI_ENABLED=true` 且模型密钥有效。当前重新部署的本机栈为 `AI_ENABLED=false`，只能现场回查旧动作 `80e6e54f-5e05-3dbd-ac96-233a42df970c` 的成功工单并运行不依赖模型的种子工作流；不能把这条历史动作说成本次新创建。
+
 ### 0:00～0:40：启动与边界
 
-1. 展示 `docker compose -f compose.demo.yml ps`，确认 mysql/backend/web 都 healthy。
-2. 本机最终 release 栈打开 `http://localhost:15175`；全新且无端口冲突的环境使用 Compose 默认 `http://localhost:15173`。登录后说明：浏览器只访问同源 Web，密码和模型 Key 不在前端；本演示端口只绑定 localhost。
+1. 展示 `docker compose -f compose.yaml ps`，确认 `ai-chatbot` 项目下 mysql/backend/web 都 healthy；当前本机使用原数据卷，配置了 `SERVICE_EXISTING_VOLUMES=true`。
+2. 打开 `http://localhost:15175`；这也是全新环境的固定默认 Web 端口。登录后说明：浏览器只访问同源 Web，密码和模型 Key 不在前端；本演示端口只绑定 localhost。当前本机 AI 关闭，可展示旧动作回查和离线工作流；实时模型对话需配置有效密钥并启用 AI。
 3. 点出本轮是单 Agent Tool Calling + 固定工作流编排，不宣称多 Agent 或分布式 exactly-once。
 
 ### 0:40～2:20：正常售后闭环
