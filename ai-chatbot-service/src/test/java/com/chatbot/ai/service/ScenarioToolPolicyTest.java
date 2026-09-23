@@ -30,7 +30,7 @@ class ScenarioToolPolicyTest {
                 "客户权益查询", "订单履约查询", "售后资格校验", "创建服务工单"))))
                 .containsExactlyInAnyOrder(
                         "queryCustomerEntitlements", "queryOrder",
-                        "checkAfterSalesEligibility", "createServiceTicket")
+                        "checkAfterSalesEligibility", "prepareServiceTicket")
                 .doesNotContain("queryBusinessSubject", "queryServiceTickets");
     }
 
@@ -41,7 +41,7 @@ class ScenarioToolPolicyTest {
         assertThat(names(policy.allowedCallbacks(scenario(
                 "业务主体查询", "工单进度查询", "创建 IT 工单"))))
                 .containsExactlyInAnyOrder(
-                        "queryBusinessSubject", "queryServiceTickets", "createServiceTicket")
+                        "queryBusinessSubject", "queryServiceTickets", "prepareServiceTicket")
                 .doesNotContain("queryCustomerEntitlements", "queryOrder", "checkAfterSalesEligibility");
     }
 
@@ -65,7 +65,7 @@ class ScenarioToolPolicyTest {
                 callback("queryBusinessSubject"),
                 callback("checkAfterSalesEligibility"),
                 callback("queryServiceTickets"),
-                callback("createServiceTicket")
+                callback("prepareServiceTicket")
         };
         when(callbacks.getToolCallbacks()).thenReturn(availableCallbacks);
         return new ScenarioToolPolicy(provider);

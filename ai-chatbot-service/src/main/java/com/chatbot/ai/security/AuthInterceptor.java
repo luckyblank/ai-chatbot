@@ -28,6 +28,16 @@ public class AuthInterceptor implements HandlerInterceptor {
         String token = cookieValue(request, AuthService.SESSION_COOKIE);
         var user = authService.authenticate(token);
         if (user.isPresent()) {
+            if (isUnsafe(request.getMethod())
+                    && !authService.validateCsrf(token, request.getHeader(AuthService.CSRF_HEADER))) {
+                response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+                response.setCharacterEncoding(StandardCharsets.UTF_8.name());
+                response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                objectMapper.writeValue(response.getWriter(), Map.of(
+                        "timestamp", Instant.now().toString(), "status", 403,
+                        "message", "CSRF 校验失败，请刷新页面后重试"));
+                return false;
+            }
             request.setAttribute(USER_ATTRIBUTE, user.get());
             return true;
         }
@@ -44,5 +54,11 @@ public class AuthInterceptor implements HandlerInterceptor {
         if (cookies == null) return null;
         return Arrays.stream(cookies).filter(cookie -> name.equals(cookie.getName()))
                 .map(Cookie::getValue).findFirst().orElse(null);
+    }
+
+    private boolean isUnsafe(String method) {
+        return !("GET".equalsIgnoreCase(method)
+                || "HEAD".equalsIgnoreCase(method)
+                || "OPTIONS".equalsIgnoreCase(method));
     }
 }

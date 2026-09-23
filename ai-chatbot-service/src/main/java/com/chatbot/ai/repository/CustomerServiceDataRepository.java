@@ -3,11 +3,13 @@ package com.chatbot.ai.repository;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.stereotype.Repository;
 
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.Locale;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -74,6 +76,7 @@ public class CustomerServiceDataRepository {
                     INDEX idx_service_ticket_order (order_no)
                 )
                 """);
+        ensureTicketActionColumns();
         seedIfEmpty();
     }
 
@@ -112,8 +115,15 @@ public class CustomerServiceDataRepository {
                 rs.getString("owner_team"), rs.getTimestamp("updated_at").toInstant()), args);
     }
 
-    public TicketView createTicket(String customerNo, String orderNo, String category, String priority, String summary) {
-        String ticketNo = "TK" + System.currentTimeMillis();
+    public CreatedTicket createTicketForAction(String actionId, String actorUserId,
+                                               String customerNo, String orderNo,
+                                               String category, String priority, String summary) {
+        if (actionId == null || actionId.isBlank()) {
+            throw new IllegalArgumentException("正式工单必须绑定确认动作");
+        }
+        String ticketId = UUID.randomUUID().toString();
+        String ticketNo = "TK" + UUID.randomUUID().toString().replace("-", "")
+                .substring(0, 20).toUpperCase(Locale.ROOT);
         Instant now = Instant.now();
         String ownerTeam = switch (category) {
             case "退款", "退货", "换货" -> "售后服务组";
@@ -122,11 +132,68 @@ public class CustomerServiceDataRepository {
             default -> "综合服务组";
         };
         jdbcTemplate.update("""
-                INSERT INTO ai_service_ticket(id,ticket_no,customer_no,order_no,category,priority,summary,status,owner_team,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)
-                """, UUID.randomUUID().toString(), ticketNo, customerNo, blankToNull(orderNo), category,
-                priority, summary, "待处理", ownerTeam, Timestamp.from(now), Timestamp.from(now));
-        return new TicketView(ticketNo, customerNo, blankToNull(orderNo), category, priority, summary, "待处理", ownerTeam, now);
+                INSERT INTO ai_service_ticket(
+                    id,ticket_no,customer_no,order_no,category,priority,summary,status,owner_team,
+                    action_id,created_by_user_id,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, ticketId, ticketNo, customerNo, blankToNull(orderNo), category,
+                priority, summary, "待处理", ownerTeam, actionId, actorUserId,
+                Timestamp.from(now), Timestamp.from(now));
+        TicketView view = new TicketView(ticketNo, customerNo, blankToNull(orderNo), category,
+                priority, summary, "待处理", ownerTeam, now);
+        return new CreatedTicket(ticketId, view);
+    }
+
+    public Optional<TicketView> findTicketByActionId(String actionId) {
+        return jdbcTemplate.query("SELECT * FROM ai_service_ticket WHERE action_id=?",
+                (rs, row) -> new TicketView(rs.getString("ticket_no"), rs.getString("customer_no"),
+                        rs.getString("order_no"), rs.getString("category"), rs.getString("priority"),
+                        rs.getString("summary"), rs.getString("status"), rs.getString("owner_team"),
+                        rs.getTimestamp("updated_at").toInstant()), actionId).stream().findFirst();
+    }
+
+    private void ensureTicketActionColumns() {
+        if (!columnExists("ai_service_ticket", "action_id")) {
+            jdbcTemplate.execute("ALTER TABLE ai_service_ticket ADD COLUMN action_id VARCHAR(64) NULL");
+        }
+        if (!columnExists("ai_service_ticket", "created_by_user_id")) {
+            jdbcTemplate.execute("ALTER TABLE ai_service_ticket ADD COLUMN created_by_user_id VARCHAR(64) NULL");
+        }
+        if (!indexExists("ai_service_ticket", "uk_service_ticket_action_id")) {
+            jdbcTemplate.execute("CREATE UNIQUE INDEX uk_service_ticket_action_id ON ai_service_ticket(action_id)");
+        }
+    }
+
+    private boolean columnExists(String tableName, String columnName) {
+        Boolean exists = jdbcTemplate.execute((ConnectionCallback<Boolean>) connection -> {
+            try (var columns = connection.getMetaData().getColumns(connection.getCatalog(), null, null, null)) {
+                while (columns.next()) {
+                    if (tableName.equalsIgnoreCase(columns.getString("TABLE_NAME"))
+                            && columnName.equalsIgnoreCase(columns.getString("COLUMN_NAME"))) return true;
+                }
+            }
+            return false;
+        });
+        return Boolean.TRUE.equals(exists);
+    }
+
+    private boolean indexExists(String tableName, String indexName) {
+        Boolean exists = jdbcTemplate.execute((ConnectionCallback<Boolean>) connection -> {
+            try (var indexes = connection.getMetaData().getIndexInfo(
+                    connection.getCatalog(), null, tableName, false, false)) {
+                while (indexes.next()) {
+                    if (indexName.equalsIgnoreCase(indexes.getString("INDEX_NAME"))) return true;
+                }
+            }
+            try (var indexes = connection.getMetaData().getIndexInfo(
+                    connection.getCatalog(), null, tableName.toUpperCase(Locale.ROOT), false, false)) {
+                while (indexes.next()) {
+                    if (indexName.equalsIgnoreCase(indexes.getString("INDEX_NAME"))) return true;
+                }
+            }
+            return false;
+        });
+        return Boolean.TRUE.equals(exists);
     }
 
     private void seedIfEmpty() {
@@ -175,4 +242,5 @@ public class CustomerServiceDataRepository {
                                       String serviceTier, String subjectStatus, String serviceContext) { }
     public record TicketView(String ticketNo, String customerNo, String orderNo, String category,
                              String priority, String summary, String status, String ownerTeam, Instant updatedAt) { }
+    public record CreatedTicket(String ticketId, TicketView view) { }
 }

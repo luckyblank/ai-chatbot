@@ -68,23 +68,37 @@ public class WorkflowService {
         return repository.save(workflow);
     }
     public void delete(String id) { get(id); repository.delete(id); }
-    public List<WorkflowRun> runs(String id) { get(id); return repository.findRuns(id); }
+    public List<WorkflowRun> runs(String id, AuthenticatedUser actor) {
+        get(id);
+        requireActor(actor);
+        return repository.findRuns(id).stream().filter(run -> canAccessRun(actor, run)).toList();
+    }
+    public WorkflowRun getRun(String workflowId, String runId, AuthenticatedUser actor) {
+        get(workflowId);
+        requireActor(actor);
+        WorkflowRun run = repository.findRun(workflowId, runId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "运行记录不存在"));
+        requireRunAccess(actor, run);
+        return run;
+    }
 
     /** Compatibility endpoint: callers without an input receive a real failed input-node result. */
-    public WorkflowRun run(String id, String conversationId) {
-        return run(id, new RunWorkflowRequest(conversationId, Map.of(), null));
+    public WorkflowRun run(String id, String conversationId, AuthenticatedUser actor) {
+        return run(id, new RunWorkflowRequest(conversationId, Map.of(), null), actor);
     }
-    public WorkflowRun run(String id, RunWorkflowRequest request) {
-        return executeNew(requireRunnable(id), request, event -> { });
+    public WorkflowRun run(String id, RunWorkflowRequest request, AuthenticatedUser actor) {
+        requireActor(actor);
+        return executeNew(requireRunnable(id), request, actor, event -> { });
     }
-    public Flux<RunEvent> streamRun(String id, String conversationId) {
-        return streamRun(id, new RunWorkflowRequest(conversationId, Map.of(), null));
+    public Flux<RunEvent> streamRun(String id, String conversationId, AuthenticatedUser actor) {
+        return streamRun(id, new RunWorkflowRequest(conversationId, Map.of(), null), actor);
     }
-    public Flux<RunEvent> streamRun(String id, RunWorkflowRequest request) {
+    public Flux<RunEvent> streamRun(String id, RunWorkflowRequest request, AuthenticatedUser actor) {
+        requireActor(actor);
         WorkflowDefinition workflow = requireRunnable(id);
         return Flux.<RunEvent>create(sink -> {
             try {
-                executeNew(workflow, request, sink::next);
+                executeNew(workflow, request, actor, sink::next);
                 sink.complete();
             } catch (RuntimeException exception) {
                 sink.error(exception);
@@ -119,18 +133,38 @@ public class WorkflowService {
     }
 
     private WorkflowRun executeNew(WorkflowDefinition workflow, RunWorkflowRequest request,
+                                   AuthenticatedUser actor,
                                    Consumer<RunEvent> emit) {
         Map<String, Object> input = cleanInput(request == null ? null : request.input());
+        String startNodeId = startNode(workflow).getId();
+        String definitionVersion = definitionVersion(workflow);
         WorkflowRun run = WorkflowRun.builder().id(UUID.randomUUID().toString())
                 .workflowId(workflow.getId()).workflowName(workflow.getName())
                 .conversationId(request == null ? null : request.conversationId())
+                .ownerId(actor.id())
                 .mode("execution").status("running").startedAt(Instant.now())
+                .definitionVersion(definitionVersion).nextNodeId(startNodeId)
+                .checkpoint("run-created").statusMessage("运行记录已创建，准备执行开始节点。")
                 .input(input).steps(new ArrayList<>()).traversedEdges(new ArrayList<>()).build();
-        String startNodeId = startNode(workflow).getId();
-        emitRunStart(run, workflow, false, emit);
         Map<String, Object> values = new LinkedHashMap<>(input);
-        return executeFrom(workflow, run, startNodeId, values,
-                request == null ? null : request.knowledgeBaseId(), false, emit);
+        String knowledgeBaseId = request == null ? null : request.knowledgeBaseId();
+        Map<String, Object> context = executionContext(workflow, definitionVersion, values,
+                knowledgeBaseId);
+        refreshContext(context, values, knowledgeBaseId, startNodeId);
+        // The run id exposed by run-start is now guaranteed to be queryable.
+        repository.saveRun(run, context);
+        emitRunStart(run, workflow, false, emit);
+        try {
+            return executeFrom(workflow, run, startNodeId, values, knowledgeBaseId, context, actor, emit);
+        } catch (RuntimeException exception) {
+            log.error("Workflow execution interrupted: workflow={}, run={}", workflow.getId(), run.getId(), exception);
+            if (markInterrupted(run, context, values,
+                    "服务在节点检查点之间中断；为避免重放外部操作，本次运行不会自动继续。")) {
+                emitComplete(run, emit);
+                return run;
+            }
+            throw exception;
+        }
     }
 
     private WorkflowRun resume(WorkflowDefinition workflow, String runId, boolean approved,
@@ -139,80 +173,142 @@ public class WorkflowService {
         if (actor == null || !"ADMIN".equals(actor.role())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅管理员可处理人工审批");
         }
+        if (!workflow.isEnabled()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "工作流已停用，当前策略不允许继续审批");
+        }
         WorkflowRun run = repository.findRun(workflow.getId(), runId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "运行记录不存在"));
+        requireRunAccess(actor, run);
         if (!"waiting".equals(run.getStatus()) || run.getWaitingNodeId() == null) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "该运行记录不在等待人工确认状态");
         }
-        Map<String, Object> context = repository.findRunContext(runId);
-        WorkflowDefinition executionDefinition = context.get("workflow") == null
-                ? workflow : objectMapper.convertValue(context.get("workflow"), WorkflowDefinition.class);
+        Map<String, Object> context = new LinkedHashMap<>(repository.findRunContext(runId));
+        Object snapshot = context.get("workflowSnapshot") == null
+                ? context.get("workflow") : context.get("workflowSnapshot");
+        if (snapshot == null) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "该历史运行没有定义快照，不能使用最新定义继续；请重新运行工作流");
+        }
+        WorkflowDefinition executionDefinition = objectMapper.convertValue(snapshot, WorkflowDefinition.class);
+        String snapshotVersion = stringValue(context.get("definitionVersion"));
+        if (!snapshotVersion.isBlank() && run.getDefinitionVersion() != null
+                && !run.getDefinitionVersion().isBlank()
+                && !snapshotVersion.equals(run.getDefinitionVersion())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "运行定义快照版本不一致，请重新运行工作流");
+        }
         if (context.get("values") == null) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "审批上下文不存在，请重新运行工作流");
         }
         Map<String, Object> values = mapValue(context.get("values"));
-        String knowledgeBaseId = context.get("knowledgeBaseId") instanceof String id ? id : null;
+        String knowledgeBaseId = stringValue(context.get("knowledgeBaseId"));
+        if (knowledgeBaseId.isBlank()) knowledgeBaseId = null;
         String waitingNodeId = run.getWaitingNodeId();
         WorkflowNode node = nodeById(executionDefinition, waitingNodeId);
-        if (node == null) throw new ResponseStatusException(HttpStatus.CONFLICT, "等待节点已从工作流中删除，请重新运行");
+        if (node == null || !"approval".equals(node.getType())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "运行快照中的等待审批节点无效，请重新运行");
+        }
         WorkflowRun.RunStep step = run.getSteps().stream()
                 .filter(item -> waitingNodeId.equals(item.getNodeId()) && "waiting".equals(item.getStatus()))
                 .reduce((first, second) -> second)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.CONFLICT, "审批节点状态不完整"));
-        if (!repository.claimWaitingRun(workflow.getId(), runId)) {
+        WorkflowRun waitingSnapshot = copyRun(run);
+        Map<String, Object> waitingContext = copyContext(context);
+        if (!repository.claimWaitingRun(run, context)) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "该审批已被处理，请刷新运行记录");
         }
+        boolean decisionDurable = false;
         try {
-        emitRunStart(run, executionDefinition, true, emit);
-        Instant now = Instant.now();
-        emit.accept(new RunEvent("node-start", nodePayload(node, executionDefinition, now, values)));
-        step.setCompletedAt(now);
-        step.setDurationMs(Math.max(0, now.toEpochMilli() - step.getStartedAt().toEpochMilli()));
-        step.setStatus(approved ? "completed" : "failed");
-        step.setDetail(approved ? "人工确认通过，继续执行后续节点。" : "人工拒绝，流程停止。");
-        step.setOutput(Map.of("approved", approved, "approverId", actor.id(),
-                "approverName", actor.displayName(), "decidedAt", now));
-        step.setError(approved ? null : "人工拒绝");
-        emit.accept(new RunEvent("node-complete", stepPayload(step, executionDefinition)));
-        run.setWaitingNodeId(null);
-        if (!approved) return finish(run, "failed", values, Map.of(), emit, true);
-        values.put("approved", true);
-        WorkflowEdge edge;
-        try {
-            edge = nextEdge(executionDefinition, node, Map.of("approved", true));
-        } catch (IllegalArgumentException exception) {
-            step.setStatus("failed"); step.setDetail(exception.getMessage()); step.setError(exception.getMessage());
-            return finish(run, "failed", values, Map.of(), emit, true);
-        }
-        if (edge == null) return finish(run, "completed", values, Map.of(), emit, true);
-        traverse(run, edge, emit);
-        return executeFrom(executionDefinition, run, edge.getTarget(), values, knowledgeBaseId, true, emit);
-        } catch (RuntimeException exception) {
-            // Claim is atomic; restore a recoverable waiting state if processing fails after it.
-            run.setStatus("waiting"); run.setCompletedAt(null); run.setWaitingNodeId(waitingNodeId);
-            step.setStatus("waiting"); step.setCompletedAt(null); step.setOutput(null); step.setError(null);
-            step.setDetail("等待人工确认。请刷新后重试。");
-            try {
-                repository.updateRun(run, context);
-            } catch (RuntimeException restoreFailure) {
-                log.error("Could not restore waiting workflow run {}", runId, restoreFailure);
+            emitRunStart(run, executionDefinition, true, emit);
+            Instant now = Instant.now();
+            safeEmit(emit, new RunEvent("node-start", nodePayload(node, executionDefinition, now, values)));
+            step.setCompletedAt(now);
+            step.setDurationMs(Math.max(0, now.toEpochMilli() - step.getStartedAt().toEpochMilli()));
+            step.setStatus(approved ? "completed" : "failed");
+            step.setDetail(approved ? "人工确认通过，继续执行后续节点。" : "人工拒绝，流程停止。");
+            step.setOutput(Map.of("approved", approved, "approverId", actor.id(),
+                    "approverName", actor.displayName(), "decidedAt", now));
+            step.setError(approved ? null : "人工拒绝");
+            run.setWaitingNodeId(null);
+            if (!approved) {
+                finishPersisted(run, "failed", values, context, values,
+                        "人工拒绝，流程已停止。");
+                decisionDurable = true;
+                safeEmit(emit, new RunEvent("node-complete", stepPayload(step, executionDefinition)));
+                emitComplete(run, emit);
+                return run;
             }
+
+            values.put("approved", true);
+            WorkflowEdge edge;
+            try {
+                edge = nextEdge(executionDefinition, node, Map.of("approved", true));
+            } catch (IllegalArgumentException exception) {
+                step.setStatus("failed");
+                step.setDetail(exception.getMessage());
+                step.setError(exception.getMessage());
+                finishPersisted(run, "failed", values, context, values, exception.getMessage());
+                decisionDurable = true;
+                safeEmit(emit, new RunEvent("node-complete", stepPayload(step, executionDefinition)));
+                emitComplete(run, emit);
+                return run;
+            }
+            if (edge == null) {
+                finishPersisted(run, "completed", values, context, values, "审批完成，工作流已结束。");
+                decisionDurable = true;
+                safeEmit(emit, new RunEvent("node-complete", stepPayload(step, executionDefinition)));
+                emitComplete(run, emit);
+                return run;
+            }
+
+            run.setStatus("running");
+            run.setNextNodeId(edge.getTarget());
+            run.setCheckpoint("approval-decided");
+            run.setStatusMessage("审批决定已保存，准备执行后续节点。");
+            refreshContext(context, values, knowledgeBaseId, run.getNextNodeId());
+            repository.updateRun(run, context);
+            decisionDurable = true;
+            safeEmit(emit, new RunEvent("node-complete", stepPayload(step, executionDefinition)));
+
+            traverse(run, edge);
+            run.setCheckpoint("edge-traversed");
+            refreshContext(context, values, knowledgeBaseId, edge.getTarget());
+            repository.updateRun(run, context);
+            emitTraversal(run, edge, emit);
+            return executeFrom(executionDefinition, run, edge.getTarget(), values,
+                    knowledgeBaseId, context, actor, emit);
+        } catch (RuntimeException exception) {
+            if (!decisionDurable) restoreWaitingAfterClaim(waitingSnapshot, waitingContext, runId);
+            else markInterrupted(run, context, values,
+                    "审批决定已经保存，但后续执行中断；为避免重复执行，本次运行不会自动重放。");
             throw exception;
         }
     }
 
     private WorkflowRun executeFrom(WorkflowDefinition workflow, WorkflowRun run,
                                     String currentId, Map<String, Object> values,
-                                    String knowledgeBaseId, boolean persisted,
+                                    String knowledgeBaseId, Map<String, Object> context,
+                                    AuthenticatedUser actor,
                                     Consumer<RunEvent> emit) {
         Set<String> visited = new HashSet<>();
         run.getSteps().forEach(step -> visited.add(step.getNodeId()));
         while (currentId != null) {
             WorkflowNode node = nodeById(workflow, currentId);
-            if (node == null) return finish(run, "failed", values, Map.of(), emit, persisted);
+            if (node == null) {
+                finishPersisted(run, "failed", values, context, values,
+                        "运行快照中的下一节点不存在：" + currentId);
+                emitComplete(run, emit);
+                return run;
+            }
+            run.setStatus("running");
+            run.setCompletedAt(null);
+            run.setNextNodeId(currentId);
+            run.setCheckpoint("before-node");
+            run.setStatusMessage("准备执行节点：" + node.getName());
+            refreshContext(context, values, knowledgeBaseId, currentId);
+            repository.updateRun(run, context);
             Instant started = Instant.now();
             long startNanos = System.nanoTime();
-            emit.accept(new RunEvent("node-start", nodePayload(node, workflow, started, values)));
+            safeEmit(emit, new RunEvent("node-start", nodePayload(node, workflow, started, values)));
             String status = "completed";
             String detail = "节点已实际执行。";
             String error = null;
@@ -230,7 +326,8 @@ public class WorkflowService {
                     if ("input".equals(node.getType()) && values.isEmpty()) {
                         throw new IllegalArgumentException("请先填写测试输入，再运行工作流。");
                     }
-                    output = executor.execute(node, config, values, knowledgeBaseId, workflow.getScenarioCode());
+                    output = executor.execute(node, config, values, knowledgeBaseId,
+                            workflow.getScenarioCode(), actor);
                     if (output == null) output = Map.of();
                     if (!"output".equals(node.getType())) next = nextEdge(workflow, node, output);
                     detail = describe(node, output);
@@ -251,37 +348,190 @@ public class WorkflowService {
                     .nodeId(node.getId()).nodeName(node.getName()).nodeType(node.getType())
                     .status(status).detail(detail).error(error).input(new LinkedHashMap<>(values))
                     .output(output).durationMs(Math.max(0, (System.nanoTime() - startNanos) / 1_000_000))
-                    .startedAt(started).completedAt(completed).build();
+                    .startedAt(started).completedAt("waiting".equals(status) ? null : completed).build();
             run.getSteps().add(step);
-            emit.accept(new RunEvent("node-complete", stepPayload(step, workflow)));
-            if ("failed".equals(status)) return finish(run, "failed", values, Map.of(), emit, persisted);
+            if ("failed".equals(status)) {
+                finishPersisted(run, "failed", values, context, values, detail);
+                safeEmit(emit, new RunEvent("node-complete", stepPayload(step, workflow)));
+                emitComplete(run, emit);
+                return run;
+            }
             if ("waiting".equals(status)) {
                 run.setWaitingNodeId(node.getId());
-                Map<String, Object> context = new LinkedHashMap<>();
-                context.put("values", values);
-                context.put("knowledgeBaseId", knowledgeBaseId == null ? "" : knowledgeBaseId);
-                context.put("workflow", workflow);
-                return finish(run, "waiting", values, context, emit, persisted);
+                run.setNextNodeId(null);
+                finishPersisted(run, "waiting", values, context, values,
+                        "等待人工确认；刷新或重启后仍可继续同一次运行。");
+                safeEmit(emit, new RunEvent("node-complete", stepPayload(step, workflow)));
+                emitComplete(run, emit);
+                return run;
             }
             values.putAll(output);
-            if ("output".equals(node.getType())) return finish(run, "completed", output, Map.of(), emit, persisted);
-            if (next == null) return finish(run, "completed", values, Map.of(), emit, persisted);
-            traverse(run, next, emit);
+            if ("output".equals(node.getType())) {
+                finishPersisted(run, "completed", output, context, values, "工作流执行完成。");
+                safeEmit(emit, new RunEvent("node-complete", stepPayload(step, workflow)));
+                emitComplete(run, emit);
+                return run;
+            }
+            if (next == null) {
+                finishPersisted(run, "completed", values, context, values, "工作流执行完成。");
+                safeEmit(emit, new RunEvent("node-complete", stepPayload(step, workflow)));
+                emitComplete(run, emit);
+                return run;
+            }
+
+            run.setNextNodeId(next.getTarget());
+            run.setCheckpoint("after-node");
+            run.setStatusMessage("节点已完成，下一节点为：" + next.getTarget());
+            refreshContext(context, values, knowledgeBaseId, next.getTarget());
+            repository.updateRun(run, context);
+            safeEmit(emit, new RunEvent("node-complete", stepPayload(step, workflow)));
+
+            traverse(run, next);
+            run.setCheckpoint("edge-traversed");
+            repository.updateRun(run, context);
+            emitTraversal(run, next, emit);
             currentId = next.getTarget();
         }
-        return finish(run, "failed", values, Map.of(), emit, persisted);
+        finishPersisted(run, "failed", values, context, values, "工作流没有可执行的下一节点。");
+        emitComplete(run, emit);
+        return run;
     }
 
-    private WorkflowRun finish(WorkflowRun run, String status, Object output,
-                               Map<String, Object> context, Consumer<RunEvent> emit,
-                               boolean persisted) {
+    private WorkflowRun finishPersisted(WorkflowRun run, String status, Object output,
+                                        Map<String, Object> context, Map<String, Object> values,
+                                        String statusMessage) {
         run.setStatus(status);
         run.setOutput(output);
         run.setCompletedAt("waiting".equals(status) ? null : Instant.now());
-        if (persisted) repository.updateRun(run, context);
-        else repository.saveRun(run, context);
-        emit.accept(new RunEvent("complete", run));
+        run.setNextNodeId(null);
+        run.setCheckpoint("waiting".equals(status) ? "waiting-approval" : "terminal-" + status);
+        run.setStatusMessage(statusMessage);
+        refreshContext(context, values, stringValue(context.get("knowledgeBaseId")), null);
+        repository.updateRun(run, context);
         return run;
+    }
+
+    private Map<String, Object> executionContext(WorkflowDefinition workflow, String definitionVersion,
+                                                 Map<String, Object> values, String knowledgeBaseId) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("workflowSnapshot", workflow);
+        context.put("definitionVersion", definitionVersion);
+        context.put("values", new LinkedHashMap<>(values));
+        context.put("knowledgeBaseId", knowledgeBaseId == null ? "" : knowledgeBaseId);
+        context.put("nextNodeId", "");
+        return context;
+    }
+
+    private void refreshContext(Map<String, Object> context, Map<String, Object> values,
+                                String knowledgeBaseId, String nextNodeId) {
+        context.put("values", new LinkedHashMap<>(values));
+        context.put("knowledgeBaseId", knowledgeBaseId == null ? "" : knowledgeBaseId);
+        context.put("nextNodeId", nextNodeId == null ? "" : nextNodeId);
+    }
+
+    private boolean markInterrupted(WorkflowRun run, Map<String, Object> context,
+                                    Map<String, Object> values, String message) {
+        run.setStatus("interrupted");
+        run.setCompletedAt(Instant.now());
+        run.setCheckpoint("interrupted");
+        run.setStatusMessage(message);
+        refreshContext(context, values, stringValue(context.get("knowledgeBaseId")), run.getNextNodeId());
+        try {
+            return repository.interruptRunningRun(run, context);
+        } catch (RuntimeException persistenceFailure) {
+            log.error("Could not persist interrupted workflow run {}", run.getId(), persistenceFailure);
+            return false;
+        }
+    }
+
+    private void restoreWaitingAfterClaim(WorkflowRun waitingRun, Map<String, Object> context, String runId) {
+        waitingRun.setStatus("waiting");
+        waitingRun.setCompletedAt(null);
+        waitingRun.setCheckpoint("waiting-approval");
+        waitingRun.setStatusMessage("审批处理未保存，已安全恢复为待审批；刷新后可以重试。");
+        try {
+            if (!repository.restoreWaitingRun(waitingRun, context)) {
+                log.warn("Workflow run {} was no longer claimable while restoring approval", runId);
+            }
+        } catch (RuntimeException restoreFailure) {
+            log.error("Could not restore waiting workflow run {}; startup recovery will close it", runId,
+                    restoreFailure);
+        }
+    }
+
+    private WorkflowRun copyRun(WorkflowRun run) {
+        List<WorkflowRun.RunStep> steps = run.getSteps() == null ? new ArrayList<>()
+                : run.getSteps().stream().map(this::copyStep).collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+        List<WorkflowEdge> edges = run.getTraversedEdges() == null ? new ArrayList<>()
+                : run.getTraversedEdges().stream()
+                .map(edge -> new WorkflowEdge(edge.getId(), edge.getSource(), edge.getTarget(), edge.getBranch()))
+                .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+        return WorkflowRun.builder()
+                .id(run.getId()).workflowId(run.getWorkflowId()).workflowName(run.getWorkflowName())
+                .conversationId(run.getConversationId()).ownerId(run.getOwnerId())
+                .mode(run.getMode()).status(run.getStatus())
+                .definitionVersion(run.getDefinitionVersion()).nextNodeId(run.getNextNodeId())
+                .checkpoint(run.getCheckpoint()).statusMessage(run.getStatusMessage())
+                .input(run.getInput()).output(run.getOutput()).traversedEdges(edges)
+                .waitingNodeId(run.getWaitingNodeId()).startedAt(run.getStartedAt())
+                .completedAt(run.getCompletedAt()).steps(steps).build();
+    }
+
+    private WorkflowRun.RunStep copyStep(WorkflowRun.RunStep step) {
+        return WorkflowRun.RunStep.builder()
+                .nodeId(step.getNodeId()).nodeName(step.getNodeName()).nodeType(step.getNodeType())
+                .status(step.getStatus()).detail(step.getDetail()).input(step.getInput()).output(step.getOutput())
+                .error(step.getError()).durationMs(step.getDurationMs())
+                .startedAt(step.getStartedAt()).completedAt(step.getCompletedAt()).build();
+    }
+
+    private Map<String, Object> copyContext(Map<String, Object> context) {
+        Map<String, Object> copy = new LinkedHashMap<>(context);
+        copy.put("values", new LinkedHashMap<>(mapValue(context.get("values"))));
+        return copy;
+    }
+
+    private void emitComplete(WorkflowRun run, Consumer<RunEvent> emit) {
+        safeEmit(emit, new RunEvent("complete", run));
+    }
+
+    private void safeEmit(Consumer<RunEvent> emit, RunEvent event) {
+        try {
+            emit.accept(event);
+        } catch (RuntimeException emissionFailure) {
+            // Transport failure must not roll a durable workflow checkpoint backwards.
+            log.debug("Workflow event delivery stopped: event={}, run={}", event.name(),
+                    event.data() instanceof WorkflowRun run ? run.getId() : "n/a", emissionFailure);
+        }
+    }
+
+    private String definitionVersion(WorkflowDefinition workflow) {
+        return workflow.getId() + ":" + (workflow.getUpdatedAt() == null ? "unknown" : workflow.getUpdatedAt());
+    }
+
+    private String stringValue(Object value) {
+        return value == null ? "" : String.valueOf(value).trim();
+    }
+
+    private void requireActor(AuthenticatedUser actor) {
+        if (actor == null || actor.id() == null || actor.id().isBlank()) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "登录状态无效");
+        }
+    }
+
+    private boolean canAccessRun(AuthenticatedUser actor, WorkflowRun run) {
+        // Keep the legacy-owner migration rule inside the service boundary as well
+        // as the current admin-only controller. New rows are creator-bound.
+        if (run.getOwnerId() == null || run.getOwnerId().isBlank()) {
+            return "ADMIN".equals(actor.role());
+        }
+        return run.getOwnerId().equals(actor.id());
+    }
+
+    private void requireRunAccess(AuthenticatedUser actor, WorkflowRun run) {
+        if (!canAccessRun(actor, run)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "无权访问其他操作员的工作流运行记录");
+        }
     }
 
     private void emitRunStart(WorkflowRun run, WorkflowDefinition workflow, boolean resumed,
@@ -290,7 +540,9 @@ public class WorkflowService {
         payload.put("runId", run.getId()); payload.put("startedAt", run.getStartedAt());
         payload.put("totalNodes", workflow.getNodes().size()); payload.put("mode", "execution");
         payload.put("resumed", resumed);
-        emit.accept(new RunEvent("run-start", payload));
+        payload.put("definitionVersion", run.getDefinitionVersion());
+        payload.put("checkpoint", run.getCheckpoint());
+        safeEmit(emit, new RunEvent("run-start", payload));
     }
 
     private Map<String, Object> nodePayload(WorkflowNode node, WorkflowDefinition workflow,
@@ -316,13 +568,17 @@ public class WorkflowService {
         return payload;
     }
 
-    private void traverse(WorkflowRun run, WorkflowEdge edge, Consumer<RunEvent> emit) {
+    private void traverse(WorkflowRun run, WorkflowEdge edge) {
         run.getTraversedEdges().add(edge);
+    }
+
+    private void emitTraversal(WorkflowRun run, WorkflowEdge edge, Consumer<RunEvent> emit) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("edgeId", edge.getId()); payload.put("source", edge.getSource());
         payload.put("target", edge.getTarget());
         if (edge.getBranch() != null) payload.put("branch", edge.getBranch());
-        emit.accept(new RunEvent("edge-traverse", payload));
+        payload.put("checkpoint", run.getCheckpoint());
+        safeEmit(emit, new RunEvent("edge-traverse", payload));
     }
 
     private WorkflowEdge nextEdge(WorkflowDefinition workflow, WorkflowNode node, Map<String, Object> output) {

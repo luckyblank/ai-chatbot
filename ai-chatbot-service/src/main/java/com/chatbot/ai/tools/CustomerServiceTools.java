@@ -1,22 +1,28 @@
 package com.chatbot.ai.tools;
 
 import com.chatbot.ai.repository.CustomerServiceDataRepository;
+import com.chatbot.ai.domain.action.PendingActionView;
+import com.chatbot.ai.service.BusinessAuthorizationService;
+import com.chatbot.ai.service.PendingActionService;
 import com.chatbot.ai.service.ToolTraceRecorder;
+import com.chatbot.ai.service.TrustedToolContext;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;
 
-import java.time.Duration;
-import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 
 @Component
 @RequiredArgsConstructor
 public class CustomerServiceTools {
+    private static final Set<String> AFTER_SALES_ACTIONS = Set.of("退款", "退货", "换货");
     private final CustomerServiceDataRepository repository;
     private final ToolTraceRecorder traceRecorder;
+    private final BusinessAuthorizationService authorization;
+    private final PendingActionService pendingActionService;
 
     @Tool(description = "按客户编号查询已脱敏的客户身份、会员/订阅等级、账号状态与服务权益。不得猜测客户编号。")
     public CustomerServiceDataRepository.CustomerView queryCustomerEntitlements(
@@ -24,6 +30,8 @@ public class CustomerServiceTools {
             ToolContext toolContext) {
         long started = System.nanoTime();
         try {
+            TrustedToolContext trusted = TrustedToolContext.require(toolContext);
+            authorization.requireBusinessSubjectAccess(trusted.actor(), customerNo);
             var result = repository.findCustomer(customerNo).orElse(null);
             traceRecorder.record(toolContext, "查询客户权益", "客户编号=" + safe(customerNo) + "；" + (result == null ? "未找到客户" : "返回已脱敏客户资料与服务权益"), "completed", elapsed(started));
             return result;
@@ -38,7 +46,8 @@ public class CustomerServiceTools {
             ToolContext toolContext) {
         long started = System.nanoTime();
         try {
-            var result = repository.findOrder(orderNo).orElse(null);
+            TrustedToolContext trusted = TrustedToolContext.require(toolContext);
+            var result = authorization.requireOrderAccess(trusted.actor(), orderNo);
             traceRecorder.record(toolContext, "查询订单履约", "订单号=" + safe(orderNo) + "；" + (result == null ? "未找到订单" : "已返回订单与履约状态"), "completed", elapsed(started));
             return result;
         } catch (RuntimeException exception) {
@@ -51,6 +60,8 @@ public class CustomerServiceTools {
             @ToolParam(description = "业务主体编号，例如 TENANT-2001、EMP-3108 或 MER-8802") String subjectNo,
             ToolContext toolContext) {
         long started = System.nanoTime();
+        TrustedToolContext trusted = TrustedToolContext.require(toolContext);
+        authorization.requireBusinessSubjectAccess(trusted.actor(), subjectNo);
         var result = repository.findBusinessSubject(subjectNo).orElse(null);
         traceRecorder.record(toolContext, "查询业务主体", "主体编号=" + safe(subjectNo) + "；" + (result == null ? "未找到主体" : "返回类型、服务等级与当前状态"), "completed", elapsed(started));
         return result;
@@ -62,12 +73,23 @@ public class CustomerServiceTools {
             @ToolParam(description = "售后动作：退款、退货或换货") String requestedAction,
             ToolContext toolContext) {
         long started = System.nanoTime();
-        var order = repository.findOrder(orderNo).orElse(null);
+        TrustedToolContext trusted = TrustedToolContext.require(toolContext);
+        var order = authorization.requireOrderAccess(trusted.actor(), orderNo);
+        String normalizedAction = requestedAction == null ? "" : requestedAction.trim();
+        if (!AFTER_SALES_ACTIONS.contains(normalizedAction)) {
+            throw new IllegalArgumentException("售后动作必须是退款、退货或换货");
+        }
         EligibilityResult result;
-        if (order == null) result = new EligibilityResult(false, "未找到订单，无法校验", true);
-        else if ("服务中".equals(order.orderStatus()) && "退货".equals(requestedAction)) result = new EligibilityResult(false, "数字化服务不适用实物退货流程，需转合同变更审核", true);
-        else if (order.deliveredAt() != null && Duration.between(order.deliveredAt(), Instant.now()).toDays() <= 7) result = new EligibilityResult(true, "签收未超过 7 天，可进入售后材料核验", false);
-        else result = new EligibilityResult(false, "超出自动受理范围，需要人工复核合同、商品状态或例外政策", true);
+        if (!trusted.policyEvidenceAvailable()) {
+            result = new EligibilityResult(false,
+                    "当前没有足够的政策证据，不能自动认定售后资格，需要补充政策资料或转人工复核", true);
+        } else {
+            // Retrieval presence alone cannot prove that a particular policy clause
+            // applies to this order. Until evidence is bound to a claim-level rule,
+            // keep the decision conservative and require a human review.
+            result = new EligibilityResult(false,
+                    "已检索到相关资料，但尚未完成具体条款与本订单的逐项核验，需要人工复核", true);
+        }
         traceRecorder.record(toolContext, "校验售后资格", "订单号=" + safe(orderNo) + "；诉求=" + requestedAction + "；结论=" + result.reason(), "completed", elapsed(started));
         return result;
     }
@@ -78,32 +100,32 @@ public class CustomerServiceTools {
             @ToolParam(required = false, description = "订单号，可选") String orderNo,
             ToolContext toolContext) {
         long started = System.nanoTime();
+        TrustedToolContext trusted = TrustedToolContext.require(toolContext);
+        authorization.requireBusinessSubjectAccess(trusted.actor(), customerNo);
+        if (orderNo != null && !orderNo.isBlank()) {
+            var order = authorization.requireOrderAccess(trusted.actor(), orderNo);
+            if (!customerNo.equals(order.customerNo())) throw new IllegalArgumentException("订单不属于所选客户");
+        }
         var result = repository.findTickets(customerNo, orderNo);
         traceRecorder.record(toolContext, "查询服务工单", "客户编号=" + safe(customerNo) + "；返回 " + result.size() + " 条工单", "completed", elapsed(started));
         return result;
     }
 
-    @Tool(description = "创建企业客服工单。只有用户已经明确确认提交，且客户编号、问题摘要完整时才可调用。不得代替用户确认。")
-    public CustomerServiceDataRepository.TicketView createServiceTicket(
+    @Tool(description = "准备企业客服工单草案，供界面展示并等待已认证用户确认。本工具绝不创建正式工单；不得声称草案已经执行。")
+    public PendingActionView prepareServiceTicket(
             @ToolParam(description = "客户编号") String customerNo,
             @ToolParam(required = false, description = "关联订单号，可选") String orderNo,
             @ToolParam(description = "问题分类：退款、退货、换货、物流、账户、权限或其他") String category,
             @ToolParam(description = "优先级：低、中、高、紧急") String priority,
             @ToolParam(description = "不超过 200 字的问题摘要，不得包含密码、完整证件号或完整银行卡号") String summary,
-            @ToolParam(description = "用户明确确认提交时传入 CONFIRMED") String confirmation,
             ToolContext toolContext) {
         long started = System.nanoTime();
-        if (!"CONFIRMED".equals(confirmation)) {
-            traceRecorder.record(toolContext, "创建服务工单", "未获得用户明确确认，已阻止写入", "skipped", elapsed(started));
-            throw new IllegalArgumentException("创建工单前必须获得用户明确确认");
-        }
-        if (repository.findCustomer(customerNo).isEmpty() && repository.findBusinessSubject(customerNo).isEmpty()) {
-            throw new IllegalArgumentException("客户或业务主体编号不存在");
-        }
-        String safeSummary = summary == null ? "" : summary.trim();
-        if (safeSummary.isBlank() || safeSummary.length() > 200) throw new IllegalArgumentException("问题摘要需为 1—200 个字符");
-        var result = repository.createTicket(customerNo, orderNo, category, priority, safeSummary);
-        traceRecorder.record(toolContext, "创建服务工单", "工单号=" + result.ticketNo() + "；分类=" + category + "；负责团队=" + result.ownerTeam(), "completed", elapsed(started));
+        TrustedToolContext trusted = TrustedToolContext.require(toolContext);
+        PendingActionView result = pendingActionService.prepareServiceTicket(
+                trusted, customerNo, orderNo, category, priority, summary);
+        traceRecorder.record(toolContext, "准备服务工单草案",
+                "动作=" + result.actionId() + "；版本=" + result.version() + "；状态=" + result.status(),
+                "completed", elapsed(started));
         return result;
     }
 

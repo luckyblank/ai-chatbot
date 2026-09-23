@@ -28,10 +28,10 @@ public class ScenarioToolPolicy {
             Map.entry("商家主体查询", Set.of("queryBusinessSubject")),
             Map.entry("工单进度查询", Set.of("queryServiceTickets")),
             Map.entry("服务工单查询", Set.of("queryServiceTickets")),
-            Map.entry("创建服务工单", Set.of("createServiceTicket")),
-            Map.entry("创建支持工单", Set.of("createServiceTicket")),
-            Map.entry("创建 IT 工单", Set.of("createServiceTicket")),
-            Map.entry("创建运营工单", Set.of("createServiceTicket"))
+            Map.entry("创建服务工单", Set.of("prepareServiceTicket")),
+            Map.entry("创建支持工单", Set.of("prepareServiceTicket")),
+            Map.entry("创建 IT 工单", Set.of("prepareServiceTicket")),
+            Map.entry("创建运营工单", Set.of("prepareServiceTicket"))
     );
 
     private final ObjectProvider<ToolCallbackProvider> callbackProvider;
@@ -41,12 +41,7 @@ public class ScenarioToolPolicy {
     }
 
     public List<FunctionCallback> allowedCallbacks(ScenarioDefinition scenario) {
-        if (scenario == null || scenario.getTools() == null) {
-            return List.of();
-        }
-        Set<String> allowedNames = scenario.getTools().stream()
-                .flatMap(label -> TOOL_NAMES_BY_LABEL.getOrDefault(label, Set.of()).stream())
-                .collect(Collectors.toUnmodifiableSet());
+        Set<String> allowedNames = allowedToolNames(scenario);
         if (allowedNames.isEmpty()) {
             return List.of();
         }
@@ -58,5 +53,16 @@ public class ScenarioToolPolicy {
                 .filter(callback -> allowedNames.contains(callback.getName()))
                 .map(callback -> (FunctionCallback) callback)
                 .toList();
+    }
+
+    public boolean isAllowed(ScenarioDefinition scenario, String callbackName) {
+        return callbackName != null && allowedToolNames(scenario).contains(callbackName);
+    }
+
+    public Set<String> allowedToolNames(ScenarioDefinition scenario) {
+        if (scenario == null || scenario.getTools() == null) return Set.of();
+        return scenario.getTools().stream()
+                .flatMap(label -> TOOL_NAMES_BY_LABEL.getOrDefault(label, Set.of()).stream())
+                .collect(Collectors.toUnmodifiableSet());
     }
 }

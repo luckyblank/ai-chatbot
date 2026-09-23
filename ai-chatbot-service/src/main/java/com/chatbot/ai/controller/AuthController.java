@@ -10,6 +10,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseCookie;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -24,16 +25,25 @@ import java.time.Duration;
 public class AuthController {
     private final AuthService authService;
 
+    @Value("${app.auth.cookie-secure:false}")
+    private boolean secureCookie;
+
     @PostMapping("/login")
     public AuthenticatedUser login(@Valid @RequestBody LoginRequest request, HttpServletResponse response) {
         AuthService.LoginResult result = authService.login(request.username(), request.password());
         var cookieBuilder = ResponseCookie.from(AuthService.SESSION_COOKIE, result.token())
-                .httpOnly(true).secure(false).sameSite("Lax").path("/");
+                .httpOnly(true).secure(secureCookie).sameSite("Lax").path("/");
         if (!Boolean.FALSE.equals(request.rememberMe())) {
             cookieBuilder.maxAge(Duration.ofSeconds(authService.sessionSeconds()));
         }
         ResponseCookie cookie = cookieBuilder.build();
         response.addHeader(HttpHeaders.SET_COOKIE, cookie.toString());
+        var csrfCookieBuilder = ResponseCookie.from(AuthService.CSRF_COOKIE, result.csrfToken())
+                .httpOnly(false).secure(secureCookie).sameSite("Lax").path("/");
+        if (!Boolean.FALSE.equals(request.rememberMe())) {
+            csrfCookieBuilder.maxAge(Duration.ofSeconds(authService.sessionSeconds()));
+        }
+        response.addHeader(HttpHeaders.SET_COOKIE, csrfCookieBuilder.build().toString());
         return result.user();
     }
 
@@ -46,6 +56,8 @@ public class AuthController {
     public void logout(HttpServletRequest request, HttpServletResponse response) {
         authService.logout(AuthInterceptor.cookieValue(request, AuthService.SESSION_COOKIE));
         response.addHeader(HttpHeaders.SET_COOKIE, ResponseCookie.from(AuthService.SESSION_COOKIE, "")
-                .httpOnly(true).secure(false).sameSite("Lax").path("/").maxAge(Duration.ZERO).build().toString());
+                .httpOnly(true).secure(secureCookie).sameSite("Lax").path("/").maxAge(Duration.ZERO).build().toString());
+        response.addHeader(HttpHeaders.SET_COOKIE, ResponseCookie.from(AuthService.CSRF_COOKIE, "")
+                .httpOnly(false).secure(secureCookie).sameSite("Lax").path("/").maxAge(Duration.ZERO).build().toString());
     }
 }

@@ -1,0 +1,80 @@
+name: heima-ai-chatbot-a1-demo
+
+services:
+  mysql:
+    image: mysql:8.0.45
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DEMO_DB_NAME:-ai_chatbot_demo}
+      MYSQL_USER: ${DEMO_DB_USERNAME:-ai_chatbot}
+      MYSQL_PASSWORD: ${DEMO_DB_PASSWORD:?Set DEMO_DB_PASSWORD before starting the demo}
+      MYSQL_ROOT_PASSWORD: ${DEMO_DB_ROOT_PASSWORD:?Set DEMO_DB_ROOT_PASSWORD before starting the demo}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "${DEMO_BIND_ADDRESS:-127.0.0.1}:${DEMO_MYSQL_PORT:-13316}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  backend:
+    build:
+      context: ./ai-chatbot-service
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DB_URL: jdbc:mysql://mysql:3306/${DEMO_DB_NAME:-ai_chatbot_demo}?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
+      DB_USERNAME: ${DEMO_DB_USERNAME:-ai_chatbot}
+      DB_PASSWORD: ${DEMO_DB_PASSWORD:?Set DEMO_DB_PASSWORD before starting the demo}
+      DEFAULT_ADMIN_USERNAME: ${DEMO_ADMIN_USERNAME:-admin}
+      DEFAULT_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:?Set DEMO_ADMIN_PASSWORD before starting the demo}
+      DEFAULT_ADMIN_DISPLAY_NAME: ${DEMO_ADMIN_DISPLAY_NAME:-演示管理员}
+      AI_ENABLED: ${AI_ENABLED:-false}
+      AI_DASHSCOPE_API_KEY: ${AI_DASHSCOPE_API_KEY:-disabled-when-ai-is-off}
+      APP_STORAGE_ROOT: /app/runtime-data
+      APP_KNOWLEDGE_SEED_ROOT: /app/knowledge-seed
+      CORS_ALLOWED_ORIGINS: http://localhost:${DEMO_WEB_PORT:-15173},http://127.0.0.1:${DEMO_WEB_PORT:-15173}
+      ADMIN_ALL_BUSINESS_SCOPE: ${ADMIN_ALL_BUSINESS_SCOPE:-true}
+      AUTH_COOKIE_SECURE: ${DEMO_COOKIE_SECURE:-false}
+      TZ: Asia/Shanghai
+    ports:
+      - "${DEMO_BIND_ADDRESS:-127.0.0.1}:${DEMO_BACKEND_PORT:-18080}:8080"
+    volumes:
+      - backend-runtime:/app/runtime-data
+      - ./knowledge-seed:/app/knowledge-seed:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl --silent --output /dev/null http://127.0.0.1:8080/api/v1/auth/me"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  web:
+    build:
+      context: ./ai-chatbot-web
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${DEMO_BIND_ADDRESS:-127.0.0.1}:${DEMO_WEB_PORT:-15173}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  mysql-data:
+  backend-runtime:

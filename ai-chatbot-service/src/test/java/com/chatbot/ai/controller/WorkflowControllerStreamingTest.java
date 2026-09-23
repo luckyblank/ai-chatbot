@@ -46,7 +46,7 @@ class WorkflowControllerStreamingTest {
         WorkflowService service = mock(WorkflowService.class);
         WorkflowRun run = WorkflowRun.builder().id("run-1").workflowId("workflow-1")
                 .status("completed").startedAt(Instant.now()).completedAt(Instant.now()).build();
-        when(service.streamRun(eq("workflow-1"), any(RunWorkflowRequest.class))).thenReturn(Flux.just(
+        when(service.streamRun(eq("workflow-1"), any(RunWorkflowRequest.class), any(AuthenticatedUser.class))).thenReturn(Flux.just(
                 new WorkflowService.RunEvent("run-start", Map.of("runId", "run-1", "totalNodes", 1)),
                 new WorkflowService.RunEvent("node-start", Map.of("nodeId", "start", "index", 0)),
                 new WorkflowService.RunEvent("node-complete", Map.of("nodeId", "start", "status", "completed")),

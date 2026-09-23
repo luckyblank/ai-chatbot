@@ -28,7 +28,8 @@ spring:
       max-request-size: 100MB
 logging:
   level:
-    org.springframework.ai: debug # AI对话的日志级别
+    # Keep prompts, model responses and tool arguments out of normal logs.
+    org.springframework.ai: ${SPRING_AI_LOG_LEVEL:info}
     com.chatbot.ai: info # 本项目的日志级别
 
 server:
@@ -37,6 +38,7 @@ server:
 app:
   ai:
     enabled: ${AI_ENABLED:true}
+    call-timeout-seconds: ${AI_CALL_TIMEOUT_SECONDS:45}
   legacy:
     enabled: ${LEGACY_API_ENABLED:false}
   storage:
@@ -49,6 +51,15 @@ app:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
   auth:
     session-hours: ${AUTH_SESSION_HOURS:24}
+    cookie-secure: ${AUTH_COOKIE_SECURE:false}
     default-username: ${DEFAULT_ADMIN_USERNAME:admin}
     default-password: ${DEFAULT_ADMIN_PASSWORD:Admin@123456}
     default-display-name: ${DEFAULT_ADMIN_DISPLAY_NAME:系统管理员}
+  workflow:
+    external-timeout: ${WORKFLOW_EXTERNAL_TIMEOUT:PT30S}
+  authorization:
+    # Demo policy is explicit: ADMIN receives all business-subject scope. Set
+    # false when scopes are provisioned solely through ai_operator_business_scope.
+    admin-all-business-scope: ${ADMIN_ALL_BUSINESS_SCOPE:true}
+  pending-action:
+    expiry-minutes: ${PENDING_ACTION_EXPIRY_MINUTES:15}

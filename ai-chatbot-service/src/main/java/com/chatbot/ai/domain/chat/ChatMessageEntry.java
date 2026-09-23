@@ -14,6 +14,8 @@ import java.util.List;
 @NoArgsConstructor
 @AllArgsConstructor
 public class ChatMessageEntry {
+    /** Stable logical request identifier shared by a user message and its answer. */
+    private String requestId;
     private String role;
     private String content;
     private Instant createdAt;

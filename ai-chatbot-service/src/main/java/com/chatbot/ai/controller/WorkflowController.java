@@ -58,16 +58,16 @@ public class WorkflowController {
     @PostMapping("/{id}/runs") public WorkflowRun run(@PathVariable String id,
                                                          @RequestBody(required = false) RunWorkflowRequest request,
                                                          HttpServletRequest servletRequest) {
-        requireAdmin(servletRequest);
-        return service.run(id, request);
+        AuthenticatedUser actor = requireAdmin(servletRequest);
+        return service.run(id, request, actor);
     }
     @PostMapping(value = "/{id}/runs/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<Object>> streamRun(@PathVariable String id,
                                                     @RequestBody(required = false) RunWorkflowRequest request,
                                                     HttpServletRequest servletRequest,
                                                     HttpServletResponse response) {
-        requireAdmin(servletRequest);
-        Flux<WorkflowService.RunEvent> events = service.streamRun(id, request);
+        AuthenticatedUser actor = requireAdmin(servletRequest);
+        Flux<WorkflowService.RunEvent> events = service.streamRun(id, request, actor);
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
         response.setHeader(HttpHeaders.CACHE_CONTROL, "no-cache, no-transform");
         response.setHeader("X-Accel-Buffering", "no");
@@ -95,8 +95,14 @@ public class WorkflowController {
     }
     @GetMapping("/{id}/runs") public List<WorkflowRun> runs(@PathVariable String id,
                                                               HttpServletRequest request) {
-        requireAdmin(request);
-        return service.runs(id);
+        AuthenticatedUser actor = requireAdmin(request);
+        return service.runs(id, actor);
+    }
+    @GetMapping("/{id}/runs/{runId}") public WorkflowRun getRun(@PathVariable String id,
+                                                                  @PathVariable String runId,
+                                                                  HttpServletRequest request) {
+        AuthenticatedUser actor = requireAdmin(request);
+        return service.getRun(id, runId, actor);
     }
 
     private AuthenticatedUser requireAdmin(HttpServletRequest request) {

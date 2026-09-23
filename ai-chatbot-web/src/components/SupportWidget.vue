@@ -13,7 +13,8 @@ import {
   SparklesIcon,
   XMarkIcon
 } from '@heroicons/vue/24/outline'
-import { BASE_URL, conversationAPI } from '../services/api'
+import PendingActionCard from './PendingActionCard.vue'
+import { BASE_URL, conversationAPI, createRequestId, pendingActionAPI } from '../services/api'
 import { authState } from '../services/auth'
 
 const ChatMarkdown = defineAsyncComponent(() => import('./ChatMarkdown.vue'))
@@ -27,6 +28,9 @@ const isFullscreen = ref(false)
 const showHistory = ref(false)
 const currentConversationId = ref('')
 const messages = ref([])
+const pendingActions = ref([])
+const actionBusy = reactive({})
+const actionErrors = reactive({})
 const draft = ref('')
 const attachments = ref([])
 const sending = ref(false)
@@ -67,6 +71,8 @@ let suppressLauncherClick = false
 let activeStreamController = null
 let scrollQueued = false
 let sessionLoadVersion = 0
+let pendingActionPollTimer = 0
+let pendingActionRequestVersion = 0
 let savedPageOverflow = null
 let attachmentDragDepth = 0
 
@@ -163,9 +169,16 @@ function onAttachmentDrop(event) {
 }
 
 watch(() => authState.user?.username, username => {
-  if (!username) return
   clearAttachments()
   sessionLoadVersion += 1
+  resetPendingActionState()
+  if (!username) {
+    currentConversationId.value = ''
+    messages.value = []
+    initialized.value = false
+    recentSessions.value = []
+    return
+  }
   currentConversationId.value = localStorage.getItem(conversationStorageKey.value) || ''
   messages.value = []
   initialized.value = false
@@ -279,6 +292,151 @@ async function loadHistory() {
   }
 }
 
+function actionsFromPayload(payload) {
+  if (Array.isArray(payload)) return payload
+  if (Array.isArray(payload?.items)) return payload.items
+  if (Array.isArray(payload?.pendingActions)) return payload.pendingActions
+  return []
+}
+
+function sortPendingActions(items) {
+  return [...items].sort((first, second) => {
+    const firstTime = new Date(first.updatedAt || first.createdAt || 0).getTime() || 0
+    const secondTime = new Date(second.updatedAt || second.createdAt || 0).getTime() || 0
+    return secondTime - firstTime
+  })
+}
+
+function mergePendingActions(payload, replace = false) {
+  const incoming = actionsFromPayload(payload).filter(item => item?.actionId)
+  if (replace) pendingActions.value = sortPendingActions(incoming)
+  else if (incoming.length) {
+    const merged = new Map(pendingActions.value.map(item => [item.actionId, item]))
+    incoming.forEach(item => merged.set(item.actionId, { ...merged.get(item.actionId), ...item }))
+    pendingActions.value = sortPendingActions([...merged.values()])
+  }
+  schedulePendingActionPolling()
+}
+
+function upsertPendingAction(action) {
+  if (!action?.actionId || (action.conversationId && action.conversationId !== currentConversationId.value)) return
+  mergePendingActions([action])
+}
+
+function clearPendingActionPolling() {
+  if (pendingActionPollTimer) window.clearTimeout(pendingActionPollTimer)
+  pendingActionPollTimer = 0
+}
+
+function resetPendingActionState() {
+  pendingActionRequestVersion += 1
+  clearPendingActionPolling()
+  pendingActions.value = []
+  Object.keys(actionBusy).forEach(key => delete actionBusy[key])
+  Object.keys(actionErrors).forEach(key => delete actionErrors[key])
+}
+
+function schedulePendingActionPolling() {
+  clearPendingActionPolling()
+  const conversationId = currentConversationId.value
+  const hasPending = pendingActions.value.some(action => ['PENDING', 'PROCESSING', 'RUNNING'].includes(String(action.status || '').toUpperCase()))
+  if (!conversationId || !hasPending) return
+  pendingActionPollTimer = window.setTimeout(() => {
+    pendingActionPollTimer = 0
+    void refreshPendingActions(conversationId, true)
+  }, 6000)
+}
+
+async function refreshPendingActions(conversationId = currentConversationId.value, silent = false) {
+  const targetId = String(conversationId || '').trim()
+  if (!targetId) return []
+  const requestVersion = ++pendingActionRequestVersion
+  try {
+    const payload = await pendingActionAPI.list(targetId)
+    if (requestVersion !== pendingActionRequestVersion || targetId !== currentConversationId.value) return []
+    mergePendingActions(payload, true)
+    return actionsFromPayload(payload)
+  } catch (error) {
+    if (!silent && requestVersion === pendingActionRequestVersion && targetId === currentConversationId.value) {
+      notice.value = `业务动作状态加载失败：${error.message}`
+    }
+    return []
+  } finally {
+    if (requestVersion === pendingActionRequestVersion && targetId === currentConversationId.value) schedulePendingActionPolling()
+  }
+}
+
+async function refreshPendingActionStatus(action, silent = false) {
+  const actionId = action?.actionId
+  if (!actionId || actionBusy[actionId]) return null
+  pendingActionRequestVersion += 1
+  actionBusy[actionId] = 'refresh'
+  try {
+    const updated = await pendingActionAPI.get(actionId)
+    upsertPendingAction(updated)
+    delete actionErrors[actionId]
+    return updated
+  } catch (error) {
+    if (!silent) actionErrors[actionId] = error.message
+    return null
+  } finally {
+    delete actionBusy[actionId]
+    schedulePendingActionPolling()
+  }
+}
+
+async function recoverPendingAction(actionId) {
+  try {
+    const updated = await pendingActionAPI.get(actionId)
+    upsertPendingAction(updated)
+    return updated
+  } catch {
+    return null
+  }
+}
+
+async function confirmPendingAction(action) {
+  const actionId = action?.actionId
+  if (!actionId || actionBusy[actionId] || String(action.status).toUpperCase() !== 'PENDING') return
+  pendingActionRequestVersion += 1
+  actionBusy[actionId] = 'confirm'
+  delete actionErrors[actionId]
+  try {
+    const updated = await pendingActionAPI.confirm(actionId, action.version)
+    upsertPendingAction(updated)
+    if (String(updated?.status || '').toUpperCase() !== 'SUCCEEDED') {
+      actionErrors[actionId] = '服务端尚未返回正式工单成功结果，请刷新状态。'
+    }
+  } catch (error) {
+    const recovered = await recoverPendingAction(actionId)
+    if (String(recovered?.status || '').toUpperCase() !== 'SUCCEEDED') actionErrors[actionId] = error.message
+  } finally {
+    delete actionBusy[actionId]
+    schedulePendingActionPolling()
+  }
+}
+
+async function cancelPendingAction(action) {
+  const actionId = action?.actionId
+  if (!actionId || actionBusy[actionId] || String(action.status).toUpperCase() !== 'PENDING') return
+  pendingActionRequestVersion += 1
+  actionBusy[actionId] = 'cancel'
+  delete actionErrors[actionId]
+  try {
+    const updated = await pendingActionAPI.cancel(actionId, action.version)
+    upsertPendingAction(updated)
+    if (String(updated?.status || '').toUpperCase() !== 'CANCELLED') {
+      actionErrors[actionId] = '服务端尚未返回取消结果，请刷新状态。'
+    }
+  } catch (error) {
+    const recovered = await recoverPendingAction(actionId)
+    if (String(recovered?.status || '').toUpperCase() !== 'CANCELLED') actionErrors[actionId] = error.message
+  } finally {
+    delete actionBusy[actionId]
+    schedulePendingActionPolling()
+  }
+}
+
 async function restoreSession() {
   if (!currentConversationId.value) {
     initialized.value = true
@@ -292,7 +450,9 @@ async function restoreSession() {
     const session = await conversationAPI.get(requestedId)
     if (requestVersion !== sessionLoadVersion || currentConversationId.value !== requestedId) return
     messages.value = session.messages || []
+    mergePendingActions(session.pendingActions)
     initialized.value = true
+    await refreshPendingActions(requestedId)
   } catch (error) {
     if (requestVersion !== sessionLoadVersion) return
     if (error.status === 404 || error.status === 400) {
@@ -382,6 +542,7 @@ async function newConversation() {
   loadingSession.value = false
   setConversationId('')
   messages.value = []
+  resetPendingActionState()
   draft.value = ''
   clearAttachments()
   notice.value = ''
@@ -401,10 +562,12 @@ async function selectConversation(id) {
     if (requestVersion !== sessionLoadVersion) return
     setConversationId(session.id)
     messages.value = session.messages || []
+    mergePendingActions(session.pendingActions)
     clearAttachments()
     draft.value = ''
     initialized.value = true
     showHistory.value = false
+    await refreshPendingActions(session.id)
     await nextTick()
     composer.value?.focus()
     scrollToBottom()
@@ -418,6 +581,8 @@ async function selectConversation(id) {
 
 async function streamAnswer(conversationId, content, attachmentIds, assistant, retry) {
   const controller = new AbortController()
+  const requestId = retry?.requestId || assistant.requestId || createRequestId()
+  assistant.requestId = requestId
   activeStreamController = controller
   let completed = false
   try {
@@ -430,14 +595,16 @@ async function streamAnswer(conversationId, content, attachmentIds, assistant, r
         completed = true
         assistant.content = data.answer || assistant.content
         assistant.citations = data.citations || []
+        assistant.requestId = requestId
         assistant.streaming = false
         assistant.interrupted = false
         assistant.retry = null
         scrollToBottom()
       }
-    }, controller.signal)
+    }, controller.signal, requestId)
     assistant.content = result?.answer || assistant.content
     assistant.citations = result?.citations || assistant.citations
+    assistant.requestId = requestId
     assistant.streaming = false
     assistant.interrupted = false
     assistant.retry = null
@@ -453,6 +620,7 @@ async function streamAnswer(conversationId, content, attachmentIds, assistant, r
     return false
   } finally {
     if (activeStreamController === controller) activeStreamController = null
+    await refreshPendingActions(conversationId, true)
   }
 }
 
@@ -479,17 +647,18 @@ async function sendMessage() {
     uploadingAttachments.value = false
     const userIndex = messages.value.length
     const createdAt = new Date().toISOString()
+    const requestId = createRequestId()
     const assistant = reactive({
       role: 'assistant', content: '', citations: [], streaming: true,
-      interrupted: false, retry: null, createdAt
+      interrupted: false, retry: null, requestId, createdAt
     })
-    messages.value.push({ role: 'user', content, attachments: uploaded, createdAt }, assistant)
+    messages.value.push({ role: 'user', content, attachments: uploaded, requestId, createdAt }, assistant)
     draft.value = ''
     clearAttachments()
     await nextTick()
     scrollToBottom()
     const attachmentIds = uploaded.map(item => item.id)
-    await streamAnswer(currentConversationId.value, content, attachmentIds, assistant, { userIndex, content, attachmentIds })
+    await streamAnswer(currentConversationId.value, content, attachmentIds, assistant, { userIndex, content, attachmentIds, requestId })
   } catch (error) {
     notice.value = '发送失败：' + (error.message || '请稍后重试')
   } finally {
@@ -508,6 +677,8 @@ async function retryInterruptedAnswer() {
     const session = await conversationAPI.get(currentConversationId.value)
     if ((session.messages || []).length > retry.userIndex) {
       messages.value = session.messages || []
+      mergePendingActions(session.pendingActions)
+      await refreshPendingActions(currentConversationId.value, true)
       notice.value = '已从服务端恢复这轮回答。'
       await nextTick()
       scrollToBottom()
@@ -607,6 +778,10 @@ function stopLauncherDrag(event) {
   draggingLauncher.value = false
 }
 
+watch(currentConversationId, () => {
+  resetPendingActionState()
+}, { flush: 'sync' })
+
 onMounted(() => {
   window.addEventListener('resize', handleViewportResize)
   window.addEventListener('keydown', handleEscape)
@@ -617,6 +792,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleEscape)
   setPageScrollLocked(false)
   clearAttachments()
+  clearPendingActionPolling()
+  pendingActionRequestVersion += 1
   activeStreamController?.abort()
 })
 </script>
@@ -720,6 +897,19 @@ onBeforeUnmount(() => {
               <time v-if="formatMessageTime(message.createdAt)" class="support-widget-message-time" :datetime="message.createdAt" :title="formatMessageDateTime(message.createdAt)">{{ formatMessageTime(message.createdAt) }}</time>
             </div>
           </article>
+          <section v-if="pendingActions.length" class="support-widget-pending-actions" aria-label="需要人工确认的业务动作">
+            <header><strong>业务动作</strong><small>工单结果以服务端状态为准</small></header>
+            <PendingActionCard
+              v-for="action in pendingActions"
+              :key="action.actionId"
+              :action="action"
+              :busy="actionBusy[action.actionId] || ''"
+              :error="actionErrors[action.actionId] || ''"
+              @confirm="confirmPendingAction"
+              @cancel="cancelPendingAction"
+              @refresh="refreshPendingActionStatus"
+            />
+          </section>
         </div>
 
         <div v-if="notice" class="support-widget-notice" role="alert">
@@ -868,6 +1058,19 @@ onBeforeUnmount(() => {
 .support-widget-citations { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border-color); color: var(--text-muted); font-size: 11px; }
 .support-widget-citations summary { cursor: pointer; }
 .support-widget-citations p { margin: 5px 0 0; }
+.support-widget-pending-actions { display: grid; gap: 10px; margin: 6px 0 2px; }
+.support-widget-pending-actions > header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.support-widget-pending-actions > header strong { font-size: 12px; }
+.support-widget-pending-actions > header small { color: var(--text-soft); font-size: 9px; }
+.support-widget-pending-actions :deep(.pending-action-card) { width: 100%; margin: 0; padding: 12px; box-shadow: 0 5px 16px rgba(23, 32, 51, .05); }
+.support-widget-pending-actions :deep(.pending-action-card > header) { align-items: flex-start; }
+.support-widget-pending-actions :deep(.action-title small) { letter-spacing: .02em; }
+.support-widget-pending-actions :deep(dl) { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.support-widget-pending-actions :deep(dl > div) { padding: 8px; }
+.support-widget-pending-actions :deep(footer) { align-items: stretch; flex-direction: column; }
+.support-widget-pending-actions :deep(.action-buttons) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.support-widget-pending-actions :deep(.action-buttons .refresh) { grid-column: 1 / -1; }
+.support-widget-pending-actions :deep(.action-buttons button) { min-height: 36px; }
 .support-widget-state { margin: 0; padding: 46px 14px; color: var(--text-muted); font-size: 12px; text-align: center; }
 .support-widget-error button { display: block; margin: 8px auto 0; padding: 5px 9px; color: var(--primary); background: var(--primary-soft); border: 0; border-radius: 6px; }
 .support-widget-section-heading { padding: 17px 17px 10px; }

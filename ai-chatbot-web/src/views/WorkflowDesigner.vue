@@ -256,6 +256,7 @@
             <span v-if="runPhase !== 'setup'" class="run-dock-progress">{{ runProgressCount }} / {{ runTotal }} 节点</span>
             <span class="run-dock-current">{{ runPhase === 'running' ? `正在执行：${activeNodeName}` : runSummary }}</span>
             <span v-if="runRecord" class="run-dock-time">{{ `耗时 ${formatDuration(runElapsedMs)}` }}</span>
+            <button v-if="runRecord && ['waiting', 'interrupted'].includes(runPhase)" class="run-dock-toggle" type="button" :disabled="runStatusRefreshing || Boolean(approvalBusy)" @click="refreshCurrentRun"><ArrowPathIcon :class="{ 'refresh-spinning': runStatusRefreshing }" />{{ runStatusRefreshing ? '刷新中' : '刷新状态' }}</button>
             <button class="run-dock-toggle" type="button" :aria-expanded="runDockExpanded" @click="runDockExpanded = !runDockExpanded">{{ runDockExpanded ? '收起详情' : '查看详情' }}<ChevronDownIcon :class="{ rotated: runDockExpanded }" /></button>
             <button v-if="!editingLocked" class="run-dock-close" type="button" aria-label="关闭试运行面板" @click="closeRunDock"><XMarkIcon /></button>
           </div>
@@ -268,14 +269,14 @@
               <button class="run-submit" type="submit"><PlayIcon />开始运行</button>
             </form>
             <template v-else>
-            <p>下方为本次真实执行路径。点击节点可查看服务端返回的输入、输出与错误。</p>
+            <p>下方为本次真实执行路径。点击节点可查看服务端返回的输入、输出与错误。<template v-if="runRecord?.definitionVersion"> 运行快照：{{ runRecord.definitionVersion }}</template></p>
             <div v-if="runPhase === 'waiting'" class="run-approval-actions">
               <span>流程停在「{{ activeNodeName }}」；{{ canApprove ? '管理员决定后继续同一次运行。' : '仅管理员可审批，请联系管理员处理。' }}</span>
-              <button v-if="canApprove" type="button" @click="resumeWorkflow(true)">同意并继续</button>
-              <button v-if="canApprove" type="button" class="reject" @click="resumeWorkflow(false)">拒绝并结束</button>
+              <button v-if="canApprove" type="button" :disabled="Boolean(approvalBusy)" @click="resumeWorkflow(true)">{{ approvalBusy === 'approve' ? '处理中…' : '同意并继续' }}</button>
+              <button v-if="canApprove" type="button" class="reject" :disabled="Boolean(approvalBusy)" @click="resumeWorkflow(false)">{{ approvalBusy === 'reject' ? '处理中…' : '拒绝并结束' }}</button>
             </div>
             <div class="run-step-list">
-              <button v-for="(node, index) in form.nodes" :key="node.id" type="button" :class="[nodeRunStatus(node.id), { active: selectedNodeId === node.id }]" @click="selectRunNode(node.id)">
+              <button v-for="(node, index) in runDisplayNodes" :key="node.id" type="button" :class="[nodeRunStatus(node.id), { active: selectedNodeId === node.id }]" @click="selectRunNode(node.id)">
                 <span class="run-step-index">{{ index + 1 }}</span>
                 <span class="run-status-mark"></span>
                 <strong>{{ node.name || '未命名节点' }}</strong>
@@ -392,7 +393,7 @@ import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
 import '@vue-flow/minimap/dist/style.css'
 import {
-  ArrowDownIcon, ArrowLeftIcon, ArrowUpIcon, CheckCircleIcon, ClockIcon,
+  ArrowDownIcon, ArrowLeftIcon, ArrowPathIcon, ArrowUpIcon, CheckCircleIcon, ClockIcon,
   ChevronDoubleLeftIcon, ChevronDoubleRightIcon, ChevronDownIcon, CircleStackIcon, Cog6ToothIcon,
   CpuChipIcon, CursorArrowRaysIcon, ExclamationTriangleIcon, FunnelIcon, HandRaisedIcon,
   PlayIcon, PlusIcon, QueueListIcon, Squares2X2Icon, TrashIcon, WrenchScrewdriverIcon, XMarkIcon
@@ -443,6 +444,8 @@ const recentEdgeKeys = ref([])
 const runDockExpanded = ref(false)
 const runElapsedMs = ref(0)
 const runError = ref('')
+const approvalBusy = ref('')
+const runStatusRefreshing = ref(false)
 const runQuestion = ref('')
 const runExtraInput = ref('{}')
 const followActiveNode = ref(true)
@@ -473,16 +476,32 @@ const runVisible = computed(() => runPhase.value !== 'idle')
 const editingLocked = computed(() => running.value || runPhase.value === 'waiting')
 const canApprove = computed(() => authState.user?.role === 'ADMIN')
 const runButtonHint = computed(() => isNew.value ? '请先保存工作流' : runPhase.value === 'waiting' ? '请先处理待人工确认的运行' : !form.value.enabled ? '请先启用工作流' : saveState.value === 'dirty' || saveState.value === 'error' ? '请先保存当前修改，再试运行' : '输入测试数据并真实运行工作流')
-const runTotal = computed(() => form.value.nodes.length)
+const runDisplayNodes = computed(() => {
+  const nodes = [...form.value.nodes]
+  const ids = new Set(nodes.map(node => node.id))
+  Object.values(runSteps.value).forEach(step => {
+    if (step?.nodeId && !ids.has(step.nodeId)) {
+      nodes.push({ id: step.nodeId, name: step.nodeName || '运行快照节点', type: step.nodeType || 'output' })
+      ids.add(step.nodeId)
+    }
+  })
+  return nodes
+})
+const runTotal = computed(() => runRecord.value?.totalNodes || runDisplayNodes.value.length)
 const runProgressCount = computed(() => Object.values(runSteps.value).filter(step => ['completed', 'failed', 'skipped'].includes(step.status)).length)
-const activeNodeName = computed(() => form.value.nodes.find(node => node.id === activeNodeId.value)?.name || '准备开始')
-const runPhaseLabel = computed(() => runPhase.value === 'failed' && !runRecord.value ? (runProgressCount.value ? '运行中断' : '无法开始运行') : ({ setup: '设置测试输入', running: '试运行中', completed: '运行完成', failed: '运行失败', waiting: '等待人工确认' })[runPhase.value] || '试运行')
+const activeNodeName = computed(() => form.value.nodes.find(node => node.id === activeNodeId.value)?.name || runSteps.value[activeNodeId.value]?.nodeName || '准备开始')
+const runPhaseLabel = computed(() => {
+  if (runPhase.value === 'failed' && !runRecord.value) return runProgressCount.value ? '运行中断' : '无法开始运行'
+  if (runPhase.value === 'interrupted') return runRecord.value?.status === 'running' ? '运行连接中断' : '运行已中断'
+  return ({ setup: '设置测试输入', running: '试运行中', completed: '运行完成', failed: '运行失败', waiting: '等待人工确认' })[runPhase.value] || '试运行'
+})
 const runSummary = computed(() => {
   if (runPhase.value === 'setup') return '输入测试数据后开始真实执行'
   if (runError.value) return runError.value
   const failed = Object.values(runSteps.value).find(step => step.status === 'failed')
   if (failed) return `失败节点：${failed.nodeName || form.value.nodes.find(node => node.id === failed.nodeId)?.name || '未知节点'}`
   if (runPhase.value === 'waiting') return `等待节点：${activeNodeName.value}`
+  if (runPhase.value === 'interrupted') return runRecord.value?.statusMessage || '事件连接已中断，请刷新服务端运行状态。'
   return runPhase.value === 'completed' ? '已得到最终执行结果' : '等待运行结果'
 })
 const runConfigWarnings = computed(() => form.value.nodes.flatMap(node => {
@@ -506,8 +525,10 @@ const effectiveEdges = computed(() => hasExplicitEdges.value ? form.value.edges 
   target: form.value.nodes[index + 1].id
 })))
 
-const selectedCanvasNode = computed(() => form.value.nodes.find(item => item.id === selectedNodeId.value) || null)
-const selectedNodeIndex = computed(() => form.value.nodes.findIndex(item => item.id === selectedNodeId.value))
+const selectedCanvasNode = computed(() => form.value.nodes.find(item => item.id === selectedNodeId.value)
+  || (inspectorView.value === 'run' ? runDisplayNodes.value.find(item => item.id === selectedNodeId.value) : null)
+  || null)
+const selectedNodeIndex = computed(() => (inspectorView.value === 'run' ? runDisplayNodes.value : form.value.nodes).findIndex(item => item.id === selectedNodeId.value))
 const selectedRunStep = computed(() => runSteps.value[selectedNodeId.value] || null)
 const flowNodes = computed(() => form.value.nodes.map((node, index) => {
   const position = positionForNode(node.id, index)
@@ -610,6 +631,8 @@ async function loadWorkflow() {
   runController?.abort()
   clearEdgeAnimations()
   running.value = false
+  approvalBusy.value = ''
+  runStatusRefreshing.value = false
   closeRunDock(true)
   lastRun.value = null
   loading.value = true
@@ -739,9 +762,14 @@ async function runWorkflow() {
 }
 
 async function resumeWorkflow(approved) {
-  if (runPhase.value !== 'waiting' || !runRecord.value?.id || running.value || !canApprove.value) return
+  if (runPhase.value !== 'waiting' || !runRecord.value?.id || running.value || approvalBusy.value || !canApprove.value) return
+  approvalBusy.value = approved ? 'approve' : 'reject'
   runDockExpanded.value = false
-  await executeRunStream((handlers, signal) => workflowAPI.resumeStream(routeId.value, runRecord.value.id, { approved }, handlers, signal))
+  try {
+    await executeRunStream((handlers, signal) => workflowAPI.resumeStream(routeId.value, runRecord.value.id, { approved }, handlers, signal))
+  } finally {
+    approvalBusy.value = ''
+  }
 }
 
 async function executeRunStream(openStream) {
@@ -757,6 +785,22 @@ async function executeRunStream(openStream) {
   try {
     if (editorMode.value === 'canvas') await fitCanvas(false)
     const result = await openStream({
+      'run-start': event => {
+        if (requestToken !== runRequestToken || !event?.runId) return
+        const record = {
+          ...(runRecord.value || {}),
+          id: event.runId,
+          workflowId: routeId.value,
+          mode: event.mode || 'execution',
+          status: 'running',
+          totalNodes: event.totalNodes || runRecord.value?.totalNodes,
+          startedAt: event.startedAt || runRecord.value?.startedAt,
+          definitionVersion: event.definitionVersion || runRecord.value?.definitionVersion,
+          checkpoint: event.checkpoint || runRecord.value?.checkpoint
+        }
+        runRecord.value = record
+        lastRun.value = record
+      },
       'node-start': event => {
         if (requestToken !== runRequestToken) return
         activeNodeId.value = event.nodeId
@@ -788,6 +832,7 @@ async function executeRunStream(openStream) {
     if (requestToken === runRequestToken) applyRunRecord(result)
   } catch (error) {
     if (requestToken !== runRequestToken || error.name === 'AbortError') return
+    if (await recoverRunAfterStreamFailure(error, requestToken)) return
     runError.value = error.message || '试运行中断，请重试。'
     runPhase.value = 'failed'
     if (activeNodeId.value) {
@@ -808,6 +853,28 @@ async function executeRunStream(openStream) {
   }
 }
 
+async function recoverRunAfterStreamFailure(streamError, requestToken) {
+  const runId = runRecord.value?.id
+  if (!runId || !routeId.value) return false
+  try {
+    const persisted = await workflowAPI.getRun(routeId.value, runId)
+    if (requestToken !== runRequestToken) return true
+    applyRunRecord(persisted)
+    if (persisted.status === 'waiting') {
+      showNotice('运行事件流已结束，服务端仍处于待审批状态，已恢复审批卡。', 'info')
+    } else if (persisted.status === 'running') {
+      runPhase.value = 'interrupted'
+      runError.value = `事件连接已中断（${streamError.message || '连接关闭'}）；服务端最后状态仍为执行中，请刷新状态。`
+      runDockExpanded.value = true
+    } else if (persisted.status === 'interrupted') {
+      showNotice('已从服务端恢复中断结果；为避免重复外部操作，本次运行不会自动重放。', 'error')
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
 function showNotice(message, type = 'info') {
   if (noticeTimer) clearTimeout(noticeTimer)
   notice.value = message
@@ -815,12 +882,33 @@ function showNotice(message, type = 'info') {
   noticeTimer = setTimeout(() => { notice.value = ''; noticeTimer = null }, type === 'error' ? 6000 : type === 'success' ? 2500 : 3000)
 }
 
+async function refreshCurrentRun() {
+  const runId = runRecord.value?.id
+  if (!runId || !routeId.value || runStatusRefreshing.value || approvalBusy.value) return
+  runStatusRefreshing.value = true
+  try {
+    const record = await workflowAPI.getRun(routeId.value, runId)
+    applyRunRecord(record)
+    if (record.status === 'running') {
+      runPhase.value = 'interrupted'
+      runError.value = '服务端最后状态仍为执行中；当前页面没有活动事件流，请稍后再次刷新。'
+      runDockExpanded.value = true
+    } else {
+      showNotice('已同步服务端运行状态。', 'success')
+    }
+  } catch (error) {
+    showNotice(error.message || '运行状态刷新失败。', 'error')
+  } finally {
+    runStatusRefreshing.value = false
+  }
+}
+
 async function loadLatestRun(id, requestToken) {
   try {
     const runs = await workflowAPI.runs(id)
     if (routeId.value === id && requestToken === runRequestToken && !running.value && Array.isArray(runs)) {
       lastRun.value = runs.find(run => run.mode === 'execution') || null
-      if (lastRun.value?.status === 'waiting') applyRunRecord(lastRun.value)
+      if (lastRun.value) applyRunRecord(lastRun.value)
     }
   } catch { /* history is optional while editing */ }
 }
@@ -830,8 +918,11 @@ function applyRunRecord(record) {
   runRecord.value = record
   lastRun.value = record
   runSteps.value = { ...Object.fromEntries(form.value.nodes.map(node => [node.id, { nodeId: node.id, nodeName: node.name, status: 'waiting' }])), ...Object.fromEntries((record.steps || []).map(step => [step.nodeId, step])) }
-  runPhase.value = ['completed', 'waiting'].includes(record.status) ? record.status : 'failed'
-  if (runPhase.value === 'failed') markRemainingNotRun()
+  const serverStatus = String(record.status || '').toLowerCase()
+  runPhase.value = ['completed', 'waiting', 'failed', 'interrupted'].includes(serverStatus)
+    ? serverStatus
+    : serverStatus === 'running' ? 'interrupted' : 'failed'
+  if (['failed', 'interrupted'].includes(runPhase.value)) markRemainingNotRun()
   if (runPhase.value === 'completed') {
     const visited = new Set((record.steps || []).map(step => step.nodeId))
     runSteps.value = Object.fromEntries(Object.entries(runSteps.value).map(([id, step]) => [id, visited.has(id) ? step : { ...step, status: 'skipped', detail: '本次条件路径未经过该节点。' }]))
@@ -839,9 +930,16 @@ function applyRunRecord(record) {
   traversedEdges.value = record.traversedEdges || []
   activeEdgeKey.value = ''
   activeNodeId.value = runPhase.value === 'waiting' ? (record.waitingNodeId || record.steps?.find(step => step.status === 'waiting')?.nodeId || '') : ''
-  runError.value = ''
-  if (record.startedAt && record.completedAt) runElapsedMs.value = Math.max(0, new Date(record.completedAt).getTime() - new Date(record.startedAt).getTime())
-  const focusStep = record.steps?.find(step => step.status === 'failed') || (runPhase.value === 'waiting' ? record.steps?.find(step => step.nodeId === activeNodeId.value) : null)
+  runError.value = runPhase.value === 'interrupted'
+    ? (serverStatus === 'running' ? '当前页面没有活动事件流，服务端最后状态仍为执行中，请刷新状态。' : (record.statusMessage || '本次运行已在安全检查点中断，不会自动重放。'))
+    : runPhase.value === 'failed' ? (record.statusMessage || '') : ''
+  if (record.startedAt) {
+    const endedAt = record.completedAt ? new Date(record.completedAt).getTime() : Date.now()
+    runElapsedMs.value = Math.max(0, endedAt - new Date(record.startedAt).getTime())
+  }
+  const focusStep = record.steps?.find(step => step.status === 'failed')
+    || (runPhase.value === 'waiting' ? record.steps?.find(step => step.nodeId === activeNodeId.value) : null)
+    || (runPhase.value === 'interrupted' ? record.steps?.find(step => step.status === 'running' || step.nodeId === record.nextNodeId) || record.steps?.at(-1) : null)
   if (focusStep) {
     selectedNodeId.value = focusStep.nodeId
     inspectorView.value = 'run'
@@ -865,6 +963,7 @@ function closeRunDock(force = false) {
   activeEdgeKey.value = ''
   clearEdgeAnimations()
   activeNodeId.value = ''
+  approvalBusy.value = ''
   runDockExpanded.value = false
   if (inspectorView.value === 'run') inspectorView.value = selectedNodeId.value ? 'node' : 'workflow'
 }
@@ -1185,7 +1284,13 @@ function autoLayout() {
 async function fitCanvas(smooth = true) {
   await nextTick()
   try {
-    await flowApi.fitView({ ...fitViewOptions, duration: smooth ? 240 : 0 })
+    // The expanded run dock reduces canvas height; cap the zoom so lower
+    // branches remain visible instead of being clipped below the dock.
+    const maxZoom = runVisible.value && runDockExpanded.value ? Math.min(fitViewOptions.maxZoom, .63) : fitViewOptions.maxZoom
+    await flowApi.fitView({ ...fitViewOptions, maxZoom, duration: smooth ? 240 : 0 })
+    if (runVisible.value && runDockExpanded.value && flowApi.getViewport().zoom > maxZoom) {
+      await flowApi.zoomTo(maxZoom, { duration: smooth ? 240 : 0 })
+    }
   } catch { /* flow instance can be unavailable while changing routes */ }
 }
 
@@ -1278,6 +1383,7 @@ function formatTime(value) {
 </script>
 
 <style scoped lang="scss">
+.run-dock-indicator.interrupted{background:var(--warning);box-shadow:0 0 0 4px color-mix(in srgb,var(--warning) 13%,transparent)}.run-dock-toggle:disabled,.run-approval-actions button:disabled{cursor:not-allowed;opacity:.5}.run-dock-toggle svg.refresh-spinning{animation:spin .8s linear infinite}
 .workflow-designer{height:100dvh;min-height:620px;display:grid;grid-template-rows:60px minmax(0,1fr) 30px;overflow:hidden;color:var(--text-color);background:var(--canvas)}
 .designer-command-bar{position:relative;z-index:40;display:grid;grid-template-columns:minmax(280px,1fr) minmax(210px,320px) minmax(360px,1fr);align-items:center;gap:18px;padding:0 18px;background:var(--surface);border-bottom:1px solid var(--border-color);box-shadow:0 1px 0 rgba(15,23,42,.02)}
 .command-leading,.command-actions,.command-context label{display:flex;align-items:center}.command-leading{min-width:0;gap:10px}.icon-button{width:36px;height:36px;display:grid;place-items:center;flex:none;padding:0;color:var(--text-muted);background:transparent;border:1px solid transparent;border-radius:8px}.icon-button:hover:not(:disabled){color:var(--text-color);background:var(--surface-subtle);border-color:var(--border-color)}.icon-button:disabled{opacity:.35}.icon-button svg{width:18px}.back-button{border-color:var(--border-color)}
@@ -1327,5 +1433,5 @@ function formatTime(value) {
   .run-input-form{grid-template-columns:1fr}.run-input-form p{grid-column:1}.run-submit{grid-column:1;grid-row:auto;justify-self:stretch}.run-approval-actions{flex-wrap:wrap}.run-approval-actions span{flex-basis:100%}
 }
 
-@media(prefers-reduced-motion:reduce){.node-palette,.node-inspector,.flow-node-card,.run-dock-toggle svg{transition:none}.save-state.saving>span,.loading-mark,.run-dock-indicator.running,.running .run-status-mark,.run-status-mark.running,:deep(.vue-flow__edge.run-edge-active .vue-flow__edge-path){animation:none}}
+@media(prefers-reduced-motion:reduce){.node-palette,.node-inspector,.flow-node-card,.run-dock-toggle svg{transition:none}.save-state.saving>span,.loading-mark,.run-dock-indicator.running,.running .run-status-mark,.run-status-mark.running,.run-dock-toggle svg.refresh-spinning,:deep(.vue-flow__edge.run-edge-active .vue-flow__edge-path){animation:none}}
 </style>

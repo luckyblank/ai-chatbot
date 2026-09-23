@@ -1,7 +1,51 @@
 export const BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 
+const CSRF_COOKIE_NAME = 'AI_SERVICE_CSRF'
+const CSRF_HEADER_NAME = 'X-CSRF-Token'
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
+
+function cookieValue(name) {
+  if (typeof document === 'undefined' || !document.cookie) return ''
+  const prefix = `${encodeURIComponent(name)}=`
+  const entry = document.cookie.split(';').map(item => item.trim()).find(item => item.startsWith(prefix))
+  if (!entry) return ''
+  try { return decodeURIComponent(entry.slice(prefix.length)) } catch { return entry.slice(prefix.length) }
+}
+
+function securedHeaders(method, headers = {}) {
+  const merged = { ...headers }
+  if (!SAFE_METHODS.has(String(method || 'GET').toUpperCase())) {
+    const token = cookieValue(CSRF_COOKIE_NAME)
+    if (token && !merged[CSRF_HEADER_NAME]) merged[CSRF_HEADER_NAME] = token
+  }
+  return merged
+}
+
+function withRequestId(payload, requestId) {
+  const normalized = String(requestId || '').trim()
+  return normalized ? { ...payload, requestId: normalized } : payload
+}
+
+export function createRequestId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
+  let entropy
+  if (globalThis.crypto?.getRandomValues) {
+    const bytes = new Uint32Array(4)
+    globalThis.crypto.getRandomValues(bytes)
+    entropy = Array.from(bytes, value => value.toString(36)).join('')
+  } else {
+    entropy = `${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`
+  }
+  return `req-${Date.now().toString(36)}-${entropy}`
+}
+
 export async function request(path, options = {}) {
-  const response = await fetch(`${BASE_URL}${path}`, { credentials: 'include', ...options })
+  const method = options.method || 'GET'
+  const response = await fetch(`${BASE_URL}${path}`, {
+    credentials: 'include',
+    ...options,
+    headers: securedHeaders(method, options.headers)
+  })
   if (!response.ok) {
     let message = `请求失败（${response.status}）`
     try {
@@ -21,7 +65,7 @@ async function streamEvents(path, payload, handlers = {}, signal) {
   const response = await fetch(`${BASE_URL}${path}`, {
     method: 'POST',
     credentials: 'include',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    headers: securedHeaders('POST', { 'Content-Type': 'application/json', Accept: 'text/event-stream' }),
     body: JSON.stringify(payload),
     signal
   })
@@ -145,15 +189,29 @@ export const conversationAPI = {
     const body = new FormData(); body.append('file', file)
     return request(`/api/v1/conversations/${id}/attachments`, { method: 'POST', body })
   },
-  send: (id, message, attachmentIds = []) => request(`/api/v1/conversations/${id}/messages`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message, attachmentIds })
+  send: (id, message, attachmentIds = [], requestId = '') => request(`/api/v1/conversations/${id}/messages`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(withRequestId({ message, attachmentIds }, requestId))
   }),
-  sendStream: (id, message, attachmentIds = [], handlers = {}, signal) => streamEvents(
-    `/api/v1/conversations/${id}/messages/stream`, { message, attachmentIds }, handlers, signal
+  sendStream: (id, message, attachmentIds = [], handlers = {}, signal, requestId = '') => streamEvents(
+    `/api/v1/conversations/${id}/messages/stream`, withRequestId({ message, attachmentIds }, requestId), handlers, signal
   ),
-  regenerateStream: (id, messageIndex, content, attachmentIds = [], handlers = {}, signal) => streamEvents(
-    `/api/v1/conversations/${id}/messages/${messageIndex}/regenerate/stream`, { content, attachmentIds }, handlers, signal
+  regenerateStream: (id, messageIndex, content, attachmentIds = [], handlers = {}, signal, requestId = '') => streamEvents(
+    `/api/v1/conversations/${id}/messages/${messageIndex}/regenerate/stream`, withRequestId({ content, attachmentIds }, requestId), handlers, signal
   )
+}
+
+export const pendingActionAPI = {
+  list(conversationId) {
+    const query = conversationId ? `?conversationId=${encodeURIComponent(conversationId)}` : ''
+    return request(`/api/v1/pending-actions${query}`)
+  },
+  get: (actionId) => request(`/api/v1/pending-actions/${encodeURIComponent(actionId)}`),
+  confirm: (actionId, expectedVersion) => request(`/api/v1/pending-actions/${encodeURIComponent(actionId)}/confirm`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedVersion })
+  }),
+  cancel: (actionId, expectedVersion) => request(`/api/v1/pending-actions/${encodeURIComponent(actionId)}/cancel`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedVersion })
+  })
 }
 
 export const workflowAPI = {
@@ -175,7 +233,8 @@ export const workflowAPI = {
   resumeStream: (id, runId, payload, handlers = {}, signal) => streamEvents(
     `/api/v1/workflows/${id}/runs/${runId}/resume`, payload, handlers, signal
   ),
-  runs: (id) => request(`/api/v1/workflows/${id}/runs`)
+  runs: (id) => request(`/api/v1/workflows/${id}/runs`),
+  getRun: (id, runId) => request(`/api/v1/workflows/${id}/runs/${encodeURIComponent(runId)}`)
 }
 
 export const scenarioAPI = {

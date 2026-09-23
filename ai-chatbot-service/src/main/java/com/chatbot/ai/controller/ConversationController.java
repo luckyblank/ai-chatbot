@@ -2,6 +2,7 @@ package com.chatbot.ai.controller;
 
 import com.chatbot.ai.domain.chat.ChatMessageEntry;
 import com.chatbot.ai.domain.chat.ConversationSession;
+import com.chatbot.ai.domain.auth.AuthenticatedUser;
 import com.chatbot.ai.domain.vo.ChatAnswer;
 import com.chatbot.ai.domain.vo.CreateConversationRequest;
 import com.chatbot.ai.domain.vo.RegenerateMessageRequest;
@@ -13,7 +14,9 @@ import com.chatbot.ai.service.KnowledgeBaseService;
 import com.chatbot.ai.service.KnowledgeChatService;
 import com.chatbot.ai.service.AttachmentService;
 import com.chatbot.ai.service.ConversationTitleService;
+import com.chatbot.ai.security.AuthInterceptor;
 import jakarta.validation.Valid;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -66,19 +69,24 @@ public class ConversationController {
 
     @GetMapping
     public List<ConversationSession> list(
-            @RequestParam(value = "knowledgeBaseId", required = false) String knowledgeBaseId) {
-        return conversationRepository.findByKnowledgeBaseId(knowledgeBaseId);
+            @RequestParam(value = "knowledgeBaseId", required = false) String knowledgeBaseId,
+            HttpServletRequest request) {
+        AuthenticatedUser actor = requireActor(request);
+        return conversationRepository.findByKnowledgeBaseId(knowledgeBaseId).stream()
+                .filter(session -> canAccess(session, actor))
+                .toList();
     }
 
     @GetMapping("/{conversationId}")
-    public ConversationSession get(@PathVariable String conversationId) {
-        return conversationRepository.findById(conversationId)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "会话不存在"));
+    public ConversationSession get(@PathVariable String conversationId, HttpServletRequest request) {
+        return requireOwnedConversation(conversationId, requireActor(request));
     }
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
-    public ConversationSession create(@Valid @RequestBody CreateConversationRequest request) {
+    public ConversationSession create(@Valid @RequestBody CreateConversationRequest request,
+                                      HttpServletRequest servletRequest) {
+        AuthenticatedUser actor = requireActor(servletRequest);
         if (request.knowledgeBaseId() != null && !request.knowledgeBaseId().isBlank()) {
             knowledgeBaseService.getKnowledgeBase(request.knowledgeBaseId());
         }
@@ -87,6 +95,7 @@ public class ConversationController {
                 ? "新对话" : request.title().trim();
         ConversationSession session = ConversationSession.builder()
                 .id(UUID.randomUUID().toString())
+                .ownerId(actor.id())
                 .knowledgeBaseId(request.knowledgeBaseId() == null || request.knowledgeBaseId().isBlank()
                         ? null : request.knowledgeBaseId())
                 .scenarioCode(request.scenarioCode() == null || request.scenarioCode().isBlank()
@@ -101,15 +110,16 @@ public class ConversationController {
 
     @PatchMapping("/{conversationId}")
     public ConversationSession rename(@PathVariable String conversationId,
-                                      @Valid @RequestBody RenameConversationRequest request) {
-        get(conversationId);
+                                      @Valid @RequestBody RenameConversationRequest request,
+                                      HttpServletRequest servletRequest) {
+        requireOwnedConversation(conversationId, requireActor(servletRequest));
         return conversationRepository.rename(conversationId, request.title().trim());
     }
 
     @DeleteMapping("/{conversationId}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void delete(@PathVariable String conversationId) {
-        get(conversationId);
+    public void delete(@PathVariable String conversationId, HttpServletRequest request) {
+        requireOwnedConversation(conversationId, requireActor(request));
         conversationRepository.delete(conversationId);
         attachmentService.deleteConversation(conversationId);
     }
@@ -117,14 +127,17 @@ public class ConversationController {
     @PostMapping("/{conversationId}/attachments")
     @ResponseStatus(HttpStatus.CREATED)
     public ChatAttachment uploadAttachment(@PathVariable String conversationId,
-                                           @RequestParam("file") MultipartFile file) {
-        get(conversationId);
+                                           @RequestParam("file") MultipartFile file,
+                                           HttpServletRequest request) {
+        requireOwnedConversation(conversationId, requireActor(request));
         return attachmentService.store(conversationId, file);
     }
 
     @GetMapping("/{conversationId}/attachments/{attachmentId}/content")
     public ResponseEntity<FileSystemResource> attachmentContent(@PathVariable String conversationId,
-                                                                 @PathVariable String attachmentId) {
+                                                                 @PathVariable String attachmentId,
+                                                                 HttpServletRequest request) {
+        requireOwnedConversation(conversationId, requireActor(request));
         ChatAttachment attachment = attachmentService.getOwned(conversationId, attachmentId);
         FileSystemResource resource = new FileSystemResource(attachmentService.resolve(attachment));
         return ResponseEntity.ok()
@@ -136,20 +149,24 @@ public class ConversationController {
 
     @PostMapping("/{conversationId}/messages")
     public ChatAnswer send(@PathVariable String conversationId,
-                           @Valid @RequestBody SendMessageRequest request) {
-        ConversationSession session = get(conversationId);
+                           @Valid @RequestBody SendMessageRequest request,
+                           HttpServletRequest servletRequest) {
+        AuthenticatedUser actor = requireActor(servletRequest);
+        ConversationSession session = requireOwnedConversation(conversationId, actor);
         List<ChatAttachment> attachments = ownedAttachments(session.getId(), request.attachmentIds());
         KnowledgeChatService.AnswerResult result = knowledgeChatService.answer(
                 session.getId(), session.getKnowledgeBaseId(), session.getScenarioCode(), request.message(),
-                imageMedia(attachments));
-        return persistExchange(session, request, attachments, result);
+                imageMedia(attachments), actor, request.requestId());
+        return persistExchange(session, request, attachments, result, request.requestId());
     }
 
     @PostMapping(value = "/{conversationId}/messages/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<Object>> sendStream(@PathVariable String conversationId,
                                                      @Valid @RequestBody SendMessageRequest request,
+                                                     HttpServletRequest servletRequest,
                                                      HttpServletResponse response) {
-        ConversationSession session = get(conversationId);
+        AuthenticatedUser actor = requireActor(servletRequest);
+        ConversationSession session = requireOwnedConversation(conversationId, actor);
         List<ChatAttachment> attachments = ownedAttachments(session.getId(), request.attachmentIds());
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
         response.setHeader(HttpHeaders.CACHE_CONTROL, "no-cache, no-transform");
@@ -159,14 +176,15 @@ public class ConversationController {
                     restoreChatMemory(session);
                     return knowledgeChatService.streamAnswer(
                                     session.getId(), session.getKnowledgeBaseId(), session.getScenarioCode(),
-                                    request.message(), imageMedia(attachments))
+                                    request.message(), imageMedia(attachments), actor, request.requestId())
                             .map(event -> {
                                 if (event instanceof KnowledgeChatService.AnswerDelta delta) {
                                     return event("delta", Map.of("delta", delta.delta()));
                                 }
                                 KnowledgeChatService.AnswerCompleted completed =
                                         (KnowledgeChatService.AnswerCompleted) event;
-                                ChatAnswer answer = persistExchange(session, request, attachments, completed.result());
+                                ChatAnswer answer = persistExchange(session, request, attachments,
+                                        completed.result(), request.requestId());
                                 return event("complete", answer);
                             });
                 })
@@ -180,9 +198,13 @@ public class ConversationController {
     public Flux<ServerSentEvent<Object>> regenerateStream(@PathVariable String conversationId,
                                                            @PathVariable int messageIndex,
                                                            @Valid @RequestBody RegenerateMessageRequest request,
+                                                           HttpServletRequest servletRequest,
                                                            HttpServletResponse response) {
-        ConversationSession session = get(conversationId);
+        AuthenticatedUser actor = requireActor(servletRequest);
+        ConversationSession session = requireOwnedConversation(conversationId, actor);
         ChatMessageEntry original = requireUserMessage(session, messageIndex);
+        String stableRequestId = original.getRequestId() == null || original.getRequestId().isBlank()
+                ? request.requestId() : original.getRequestId();
         List<ChatAttachment> attachments = request.attachmentIds() == null
                 ? original.getAttachments() == null ? List.of() : List.copyOf(original.getAttachments())
                 : ownedAttachments(session.getId(), request.attachmentIds());
@@ -194,7 +216,7 @@ public class ConversationController {
                     rebuildChatMemory(session, messageIndex);
                     return knowledgeChatService.streamAnswer(
                                     session.getId(), session.getKnowledgeBaseId(), session.getScenarioCode(),
-                                    request.content(), imageMedia(attachments))
+                                    request.content(), imageMedia(attachments), actor, stableRequestId)
                             .map(event -> {
                                 if (event instanceof KnowledgeChatService.AnswerDelta delta) {
                                     return event("delta", Map.of("delta", delta.delta()));
@@ -202,7 +224,8 @@ public class ConversationController {
                                 KnowledgeChatService.AnswerCompleted completed =
                                         (KnowledgeChatService.AnswerCompleted) event;
                                 ChatAnswer answer = persistRegeneratedExchange(
-                                        session, messageIndex, request.content(), attachments, completed.result());
+                                        session, messageIndex, request.content(), attachments,
+                                        completed.result(), stableRequestId);
                                 return event("complete", answer);
                             });
                 })
@@ -266,14 +289,17 @@ public class ConversationController {
                                                    int messageIndex,
                                                    String content,
                                                    List<ChatAttachment> attachments,
-                                                   KnowledgeChatService.AnswerResult result) {
+                                                   KnowledgeChatService.AnswerResult result,
+                                                   String requestId) {
         ChatMessageEntry userMessage = ChatMessageEntry.builder()
+                .requestId(requestId)
                 .role("user")
                 .content(content.trim())
                 .attachments(attachments)
                 .createdAt(Instant.now())
                 .build();
         ChatMessageEntry assistantMessage = ChatMessageEntry.builder()
+                .requestId(requestId)
                 .role("assistant")
                 .content(result.answer())
                 .createdAt(Instant.now())
@@ -308,15 +334,18 @@ public class ConversationController {
     private ChatAnswer persistExchange(ConversationSession session,
                                        SendMessageRequest request,
                                        List<ChatAttachment> attachments,
-                                       KnowledgeChatService.AnswerResult result) {
+                                       KnowledgeChatService.AnswerResult result,
+                                       String requestId) {
         Instant now = Instant.now();
         ChatMessageEntry userMessage = ChatMessageEntry.builder()
+                .requestId(requestId)
                 .role("user")
                 .content(request.message())
                 .attachments(attachments)
                 .createdAt(now)
                 .build();
         ChatMessageEntry assistantMessage = ChatMessageEntry.builder()
+                .requestId(requestId)
                 .role("assistant")
                 .content(result.answer())
                 .createdAt(Instant.now())
@@ -350,5 +379,33 @@ public class ConversationController {
             return statusException.getReason();
         }
         return "回答生成失败，请稍后重试";
+    }
+
+    private AuthenticatedUser requireActor(HttpServletRequest request) {
+        AuthenticatedUser actor = request == null ? null
+                : (AuthenticatedUser) request.getAttribute(AuthInterceptor.USER_ATTRIBUTE);
+        if (actor == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "登录状态已失效，请重新登录");
+        }
+        return actor;
+    }
+
+    private ConversationSession requireOwnedConversation(String conversationId, AuthenticatedUser actor) {
+        ConversationSession session = conversationRepository.findById(conversationId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "会话不存在"));
+        if (!canAccess(session, actor)) {
+            // Avoid revealing whether another operator's conversation exists.
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "会话不存在");
+        }
+        return session;
+    }
+
+    private boolean canAccess(ConversationSession session, AuthenticatedUser actor) {
+        if (session.getOwnerId() == null || session.getOwnerId().isBlank()) {
+            // Conservative migration rule: only administrators can inspect legacy,
+            // unowned conversations; access never assigns ownership implicitly.
+            return "ADMIN".equals(actor.role());
+        }
+        return session.getOwnerId().equals(actor.id()) || "ADMIN".equals(actor.role());
     }
 }

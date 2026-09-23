@@ -5,7 +5,6 @@ import com.chatbot.ai.tools.CustomerServiceTools;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
-import org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.InMemoryChatMemory;
 import org.springframework.ai.openai.OpenAiChatModel;
@@ -26,7 +25,6 @@ public class CommonConfiguration {
     public ChatClient generalChatClient(OpenAiChatModel model, ChatMemory chatMemory) {
         return ChatClient.builder(model)
                 .defaultSystem(SystemConstants.GENERAL_ASSISTANT_SYSTEM)
-                .defaultAdvisors(new SimpleLoggerAdvisor())
                 .defaultAdvisors(new MessageChatMemoryAdvisor(chatMemory))
                 .build();
     }
@@ -38,7 +36,6 @@ public class CommonConfiguration {
         return ChatClient
                 .builder(model)
                 .defaultSystem(SystemConstants.CUSTOMER_SERVICE_SYSTEM)
-                .defaultAdvisors(new SimpleLoggerAdvisor())//帮我记录日志
                 .defaultAdvisors(new MessageChatMemoryAdvisor(chatMemory))//增强器，MessageChatMemoryAdvisor：帮我们存储对话的上下文
                 .build();
     }

@@ -19,6 +19,8 @@ import java.util.concurrent.ConcurrentHashMap;
 @RequiredArgsConstructor
 public class AuthService {
     public static final String SESSION_COOKIE = "AI_SERVICE_SESSION";
+    public static final String CSRF_COOKIE = "AI_SERVICE_CSRF";
+    public static final String CSRF_HEADER = "X-CSRF-Token";
 
     private final JdbcTemplate jdbcTemplate;
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
@@ -74,9 +76,10 @@ public class AuthService {
         UserRow row = users.get(0);
         AuthenticatedUser user = new AuthenticatedUser(row.id(), row.username(), row.displayName(), row.role());
         String token = UUID.randomUUID() + "." + UUID.randomUUID();
+        String csrfToken = UUID.randomUUID() + "." + UUID.randomUUID();
         Instant expiresAt = Instant.now().plus(Duration.ofHours(Math.max(1, sessionHours)));
-        sessions.put(token, new SessionEntry(user, expiresAt));
-        return new LoginResult(token, user, expiresAt);
+        sessions.put(token, new SessionEntry(user, csrfToken, expiresAt));
+        return new LoginResult(token, csrfToken, user, expiresAt);
     }
 
     public Optional<AuthenticatedUser> authenticate(String token) {
@@ -87,19 +90,50 @@ public class AuthService {
             sessions.remove(token);
             return Optional.empty();
         }
-        return Optional.of(session.user());
+        var users = jdbcTemplate.query("""
+                        SELECT id, username, display_name, role, enabled
+                        FROM ai_user WHERE id = ?
+                        """,
+                (rs, rowNum) -> new CurrentUserRow(
+                        new AuthenticatedUser(rs.getString("id"), rs.getString("username"),
+                                rs.getString("display_name"), rs.getString("role")),
+                        rs.getBoolean("enabled")),
+                session.user().id());
+        if (users.isEmpty() || !users.get(0).enabled()) {
+            sessions.remove(token);
+            return Optional.empty();
+        }
+        // Return the current database role and profile instead of the login-time
+        // snapshot, so disablement or role revocation takes effect on every API.
+        return Optional.of(users.get(0).user());
     }
 
     public void logout(String token) {
         if (token != null) sessions.remove(token);
     }
 
+    public boolean validateCsrf(String sessionToken, String csrfToken) {
+        if (sessionToken == null || csrfToken == null || csrfToken.isBlank()) return false;
+        SessionEntry session = sessions.get(sessionToken);
+        return session != null
+                && !session.expiresAt().isBefore(Instant.now())
+                && java.security.MessageDigest.isEqual(
+                session.csrfToken().getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                csrfToken.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
     public long sessionSeconds() {
         return Duration.ofHours(Math.max(1, sessionHours)).toSeconds();
     }
 
-    public record LoginResult(String token, AuthenticatedUser user, Instant expiresAt) { }
-    private record SessionEntry(AuthenticatedUser user, Instant expiresAt) { }
+    public record LoginResult(String token, String csrfToken, AuthenticatedUser user, Instant expiresAt) {
+        /** Backwards-compatible constructor used by focused controller tests. */
+        public LoginResult(String token, AuthenticatedUser user, Instant expiresAt) {
+            this(token, UUID.randomUUID() + "." + UUID.randomUUID(), user, expiresAt);
+        }
+    }
+    private record SessionEntry(AuthenticatedUser user, String csrfToken, Instant expiresAt) { }
+    private record CurrentUserRow(AuthenticatedUser user, boolean enabled) { }
     private record UserRow(String id, String username, String passwordHash, String displayName,
                            String role, boolean enabled) { }
 }

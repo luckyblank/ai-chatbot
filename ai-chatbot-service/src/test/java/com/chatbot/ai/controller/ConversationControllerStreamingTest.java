@@ -5,6 +5,8 @@ import com.chatbot.ai.domain.chat.ChatAttachment;
 import com.chatbot.ai.domain.chat.ChatMessageEntry;
 import com.chatbot.ai.domain.chat.ChatTraceStep;
 import com.chatbot.ai.domain.chat.ConversationSession;
+import com.chatbot.ai.domain.auth.AuthenticatedUser;
+import com.chatbot.ai.security.AuthInterceptor;
 import com.chatbot.ai.repository.ConversationRepository;
 import com.chatbot.ai.service.AttachmentService;
 import com.chatbot.ai.service.ConversationTitleService;
@@ -42,6 +44,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -55,6 +58,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 class ConversationControllerStreamingTest {
+    private static final AuthenticatedUser ACTOR =
+            new AuthenticatedUser("admin-1", "admin", "管理员", "ADMIN");
     @TempDir
     Path tempDirectory;
 
@@ -85,6 +90,7 @@ class ConversationControllerStreamingTest {
 
         session = ConversationSession.builder()
                 .id("conversation-1")
+                .ownerId(ACTOR.id())
                 .title("新对话")
                 .scenarioCode("general")
                 .createdAt(Instant.now())
@@ -110,7 +116,7 @@ class ConversationControllerStreamingTest {
         KnowledgeChatService.AnswerResult answer = new KnowledgeChatService.AnswerResult(
                 "您好，可以处理。", List.of(citation), List.of(trace));
         when(knowledgeChatService.streamAnswer(eq("conversation-1"), isNull(), eq("general"),
-                eq("可以处理吗"), anyList()))
+                eq("可以处理吗"), anyList(), eq(ACTOR), eq("request-1234")))
                 .thenReturn(Flux.just(
                         new KnowledgeChatService.AnswerDelta("您好，"),
                         new KnowledgeChatService.AnswerDelta("可以处理。"),
@@ -119,9 +125,10 @@ class ConversationControllerStreamingTest {
                 .thenReturn(new ConversationRepository.AppendExchangeResult(session, false));
 
         MvcResult pending = mockMvc.perform(post("/api/v1/conversations/conversation-1/messages/stream")
+                        .requestAttr(AuthInterceptor.USER_ATTRIBUTE, ACTOR)
                         .contentType(MediaType.APPLICATION_JSON)
                         .accept(MediaType.TEXT_EVENT_STREAM)
-                        .content("{\"message\":\"可以处理吗\"}"))
+                        .content("{\"message\":\"可以处理吗\",\"requestId\":\"request-1234\"}"))
                 .andExpect(request().asyncStarted())
                 .andExpect(header().string("Cache-Control", "no-cache, no-transform"))
                 .andExpect(header().string("X-Accel-Buffering", "no"))
@@ -169,15 +176,16 @@ class ConversationControllerStreamingTest {
         Path imagePath = Files.write(tempDirectory.resolve("test-image.png"), new byte[]{1, 2, 3});
         when(attachmentService.resolve(image)).thenReturn(imagePath);
         when(knowledgeChatService.streamAnswer(eq("conversation-1"), isNull(), eq("general"),
-                eq("请分析这张图"), anyList()))
+                eq("请分析这张图"), anyList(), eq(ACTOR), eq("request-1234")))
                 .thenReturn(Flux.just(new KnowledgeChatService.AnswerCompleted(answer)));
         when(conversationRepository.appendExchange(eq("conversation-1"), any(), any()))
                 .thenReturn(new ConversationRepository.AppendExchangeResult(session, false));
 
         MvcResult pending = mockMvc.perform(post("/api/v1/conversations/conversation-1/messages/stream")
+                        .requestAttr(AuthInterceptor.USER_ATTRIBUTE, ACTOR)
                         .contentType(MediaType.APPLICATION_JSON)
                         .accept(MediaType.TEXT_EVENT_STREAM)
-                        .content("{\"message\":\"请分析这张图\",\"attachmentIds\":[\"image-1\"]}"))
+                        .content("{\"message\":\"请分析这张图\",\"attachmentIds\":[\"image-1\"],\"requestId\":\"request-1234\"}"))
                 .andExpect(request().asyncStarted())
                 .andReturn();
 
@@ -187,7 +195,7 @@ class ConversationControllerStreamingTest {
 
         ArgumentCaptor<List<Media>> mediaCaptor = (ArgumentCaptor) ArgumentCaptor.forClass(List.class);
         verify(knowledgeChatService).streamAnswer(eq("conversation-1"), isNull(), eq("general"),
-                eq("请分析这张图"), mediaCaptor.capture());
+                eq("请分析这张图"), mediaCaptor.capture(), eq(ACTOR), eq("request-1234"));
         assertThat(mediaCaptor.getValue()).hasSize(1);
         assertThat(mediaCaptor.getValue().get(0).getName()).isEqualTo("diagram.png");
         assertThat(mediaCaptor.getValue().get(0).getMimeType().toString()).isEqualTo("image/png");
@@ -208,16 +216,17 @@ class ConversationControllerStreamingTest {
         Path imagePath = Files.write(tempDirectory.resolve("original.png"), new byte[]{1, 2, 3});
         when(attachmentService.resolve(image)).thenReturn(imagePath);
         when(knowledgeChatService.streamAnswer(eq("conversation-1"), isNull(), eq("general"),
-                eq("修改后的问题"), anyList()))
+                eq("修改后的问题"), anyList(), eq(ACTOR), eq("request-1234")))
                 .thenReturn(Flux.just(
                         new KnowledgeChatService.AnswerDelta("新回"),
                         new KnowledgeChatService.AnswerCompleted(answer)));
 
         MvcResult pending = mockMvc.perform(post(
                         "/api/v1/conversations/conversation-1/messages/0/regenerate/stream")
+                        .requestAttr(AuthInterceptor.USER_ATTRIBUTE, ACTOR)
                         .contentType(MediaType.APPLICATION_JSON)
                         .accept(MediaType.TEXT_EVENT_STREAM)
-                        .content("{\"content\":\"修改后的问题\",\"attachmentIds\":[\"image-1\"]}"))
+                        .content("{\"content\":\"修改后的问题\",\"attachmentIds\":[\"image-1\"],\"requestId\":\"request-1234\"}"))
                 .andExpect(request().asyncStarted())
                 .andReturn();
 
@@ -239,14 +248,15 @@ class ConversationControllerStreamingTest {
     @Test
     void turnsGenerationFailureIntoTerminalErrorEventWithoutPersistingPartialExchange() throws Exception {
         when(knowledgeChatService.streamAnswer(eq("conversation-1"), isNull(), eq("general"),
-                eq("测试异常"), anyList()))
+                eq("测试异常"), anyList(), eq(ACTOR), eq("request-1234")))
                 .thenReturn(Flux.error(new ResponseStatusException(
                         HttpStatus.SERVICE_UNAVAILABLE, "模型服务暂不可用")));
 
         MvcResult pending = mockMvc.perform(post("/api/v1/conversations/conversation-1/messages/stream")
+                        .requestAttr(AuthInterceptor.USER_ATTRIBUTE, ACTOR)
                         .contentType(MediaType.APPLICATION_JSON)
                         .accept(MediaType.TEXT_EVENT_STREAM)
-                        .content("{\"message\":\"测试异常\"}"))
+                        .content("{\"message\":\"测试异常\",\"requestId\":\"request-1234\"}"))
                 .andExpect(request().asyncStarted())
                 .andReturn();
 
@@ -289,14 +299,15 @@ class ConversationControllerStreamingTest {
                 ChatMessageEntry.builder().role("user").content("原问题").createdAt(Instant.now()).build(),
                 ChatMessageEntry.builder().role("assistant").content("原回答").createdAt(Instant.now()).build())));
         when(knowledgeChatService.streamAnswer(eq("conversation-1"), isNull(), eq("general"),
-                eq("修改后的问题"), anyList()))
+                eq("修改后的问题"), anyList(), eq(ACTOR), eq("request-1234")))
                 .thenReturn(Flux.error(new IllegalStateException("模型断开")));
 
         MvcResult pending = mockMvc.perform(post(
                         "/api/v1/conversations/conversation-1/messages/0/regenerate/stream")
+                        .requestAttr(AuthInterceptor.USER_ATTRIBUTE, ACTOR)
                         .contentType(MediaType.APPLICATION_JSON)
                         .accept(MediaType.TEXT_EVENT_STREAM)
-                        .content("{\"content\":\"修改后的问题\"}"))
+                        .content("{\"content\":\"修改后的问题\",\"requestId\":\"request-1234\"}"))
                 .andExpect(request().asyncStarted())
                 .andReturn();
         mockMvc.perform(asyncDispatch(pending))

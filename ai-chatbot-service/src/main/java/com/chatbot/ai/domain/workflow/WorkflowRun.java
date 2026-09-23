@@ -19,9 +19,19 @@ public class WorkflowRun {
     private String workflowId;
     private String workflowName;
     private String conversationId;
+    /** Authenticated operator that created the run; never populated from workflow input. */
+    private String ownerId;
     @Builder.Default
     private String mode = "execution";
     private String status;
+    /** Immutable definition version captured when this run started. */
+    private String definitionVersion;
+    /** Node that would execute next from the last durable checkpoint. */
+    private String nextNodeId;
+    /** Human-readable durable checkpoint name, exposed for recovery diagnostics. */
+    private String checkpoint;
+    /** Run-level explanation for waiting, failure, or interruption states. */
+    private String statusMessage;
     private Map<String, Object> input;
     private Object output;
     @Builder.Default

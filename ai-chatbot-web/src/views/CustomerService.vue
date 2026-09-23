@@ -81,6 +81,19 @@
             </div>
           </div>
         </article>
+        <section v-if="pendingActions.length" class="pending-action-stack" aria-label="需要人工确认的业务动作">
+          <header><span>业务动作</span><small>工单结果以服务端状态为准</small></header>
+          <PendingActionCard
+            v-for="action in pendingActions"
+            :key="action.actionId"
+            :action="action"
+            :busy="actionBusy[action.actionId] || ''"
+            :error="actionErrors[action.actionId] || ''"
+            @confirm="confirmPendingAction"
+            @cancel="cancelPendingAction"
+            @refresh="refreshPendingActionStatus"
+          />
+        </section>
         <article v-if="sending && !hasStreamingMessage" class="message assistant"><div class="avatar" aria-hidden="true"><SparklesIcon /></div><div class="message-body"><div class="message-meta"><strong>{{ selectedScenario.shortName }}</strong><span>{{ uploadingAttachments ? '正在上传附件' : '正在建立回答链路' }}</span></div><div class="bubble typing"><i></i><i></i><i></i></div></div></article>
       </div>
 
@@ -140,13 +153,16 @@ import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { ArrowUpRightIcon, ChatBubbleLeftRightIcon, CheckCircleIcon, CheckIcon, CircleStackIcon, ClipboardDocumentIcon, ClockIcon, CommandLineIcon, DocumentIcon, ExclamationCircleIcon, InformationCircleIcon, MagnifyingGlassIcon, PaperAirplaneIcon, PaperClipIcon, PencilSquareIcon, PlusIcon, ShieldCheckIcon, SparklesIcon, TrashIcon, UserIcon, WrenchScrewdriverIcon, XMarkIcon } from '@heroicons/vue/24/outline'
 import ChatMarkdown from '../components/ChatMarkdown.vue'
 import ImagePreview from '../components/ImagePreview.vue'
+import PendingActionCard from '../components/PendingActionCard.vue'
 import PanelEdgeHandleIcon from '../components/icons/PanelEdgeHandleIcon.vue'
 import { scenarios, scenarioByCode } from '../data/scenarios'
-import { BASE_URL, conversationAPI, knowledgeAPI } from '../services/api'
+import { BASE_URL, conversationAPI, createRequestId, knowledgeAPI, pendingActionAPI } from '../services/api'
 
 const route = useRoute()
 const router = useRouter()
 const knowledgeBases = ref([]), conversations = ref([]), messages = ref([]), attachments = ref([])
+const pendingActions = ref([])
+const actionBusy = reactive({}), actionErrors = reactive({})
 const selectedKnowledgeBaseId = ref(''), selectedScenarioCode = ref(scenarioByCode(route.query.scenario).code), currentConversationId = ref('')
 const input = ref(''), notice = ref(''), conversationSearch = ref(''), previewImage = ref('')
 const sending = ref(false), uploadingAttachments = ref(false), loadingKnowledgeBases = ref(false), deleting = ref(false)
@@ -198,6 +214,8 @@ let toastTimer = 0
 let copyTimer = 0
 let editDraftBackup = null
 let attachmentDragDepth = 0
+let pendingActionPollTimer = 0
+let pendingActionRequestVersion = 0
 
 const vTitleOverflow = {
   mounted(element) {
@@ -236,10 +254,15 @@ onBeforeUnmount(() => {
   if (streamScrollFrame) cancelAnimationFrame(streamScrollFrame)
   if (toastTimer) window.clearTimeout(toastTimer)
   if (copyTimer) window.clearTimeout(copyTimer)
+  clearPendingActionPolling()
+  pendingActionRequestVersion += 1
   attachments.value.forEach(revokeAttachmentPreview)
   editDraftBackup?.attachments?.forEach(revokeAttachmentPreview)
 })
-watch(currentConversationId, () => cancelMessageEdit(false))
+watch(currentConversationId, () => {
+  cancelMessageEdit(false)
+  resetPendingActionState()
+}, { flush: 'sync' })
 watch(() => queryValue(route.query.conversation), id => {
   activeStreamController?.abort()
   mobileSessionsOpen.value = false
@@ -312,7 +335,10 @@ async function applyConversationRoute(id) {
     messages.value = []
     return
   }
-  if (requestedId === currentConversationId.value) return
+  if (requestedId === currentConversationId.value) {
+    await refreshPendingActions(requestedId)
+    return
+  }
   try {
     const session = await conversationAPI.get(requestedId)
     if (requestVersion !== conversationRequestVersion || queryValue(route.query.conversation) !== requestedId) return
@@ -320,18 +346,21 @@ async function applyConversationRoute(id) {
     selectedKnowledgeBaseId.value = session.knowledgeBaseId || ''
     selectedScenarioCode.value = session.scenarioCode || selectedScenarioCode.value
     messages.value = session.messages || []
+    mergePendingActions(session.pendingActions)
     if (!conversations.value.some(item => item.id === session.id)) conversations.value = [session, ...conversations.value]
     notice.value = ''
     if (queryValue(route.query.scenario) !== selectedScenarioCode.value) {
       const query = { ...route.query, scenario: selectedScenarioCode.value }
       await router.replace({ path: route.path, query })
     }
+    await refreshPendingActions(session.id)
     await scrollToBottom()
   } catch (error) {
     if (requestVersion !== conversationRequestVersion) return
     currentConversationId.value = ''
     selectedKnowledgeBaseId.value = ''
     messages.value = []
+    resetPendingActionState()
     if (error.status === 400 || error.status === 404) {
       conversations.value = conversations.value.filter(item => item.id !== requestedId)
       notice.value = '该会话不存在或已被删除，已返回空白会话。'
@@ -353,6 +382,163 @@ async function clearConversationQuery() {
   delete query.conversation
   await router.replace({ path: route.path, query })
 }
+
+function actionsFromPayload(payload) {
+  if (Array.isArray(payload)) return payload
+  if (Array.isArray(payload?.items)) return payload.items
+  if (Array.isArray(payload?.pendingActions)) return payload.pendingActions
+  return []
+}
+
+function sortPendingActions(items) {
+  return [...items].sort((first, second) => {
+    const firstTime = new Date(first.updatedAt || first.createdAt || 0).getTime() || 0
+    const secondTime = new Date(second.updatedAt || second.createdAt || 0).getTime() || 0
+    return secondTime - firstTime
+  })
+}
+
+function mergePendingActions(payload, replace = false) {
+  const incoming = actionsFromPayload(payload).filter(item => item?.actionId)
+  if (replace) pendingActions.value = sortPendingActions(incoming)
+  else if (incoming.length) {
+    const merged = new Map(pendingActions.value.map(item => [item.actionId, item]))
+    incoming.forEach(item => merged.set(item.actionId, { ...merged.get(item.actionId), ...item }))
+    pendingActions.value = sortPendingActions([...merged.values()])
+  }
+  schedulePendingActionPolling()
+}
+
+function upsertPendingAction(action) {
+  if (!action?.actionId || (action.conversationId && action.conversationId !== currentConversationId.value)) return
+  mergePendingActions([action])
+}
+
+function clearPendingActionPolling() {
+  if (pendingActionPollTimer) window.clearTimeout(pendingActionPollTimer)
+  pendingActionPollTimer = 0
+}
+
+function resetPendingActionState() {
+  pendingActionRequestVersion += 1
+  clearPendingActionPolling()
+  pendingActions.value = []
+  Object.keys(actionBusy).forEach(key => delete actionBusy[key])
+  Object.keys(actionErrors).forEach(key => delete actionErrors[key])
+}
+
+function schedulePendingActionPolling() {
+  clearPendingActionPolling()
+  const conversationId = currentConversationId.value
+  const hasPending = pendingActions.value.some(action => ['PENDING', 'PROCESSING', 'RUNNING'].includes(String(action.status || '').toUpperCase()))
+  if (!conversationId || !hasPending) return
+  pendingActionPollTimer = window.setTimeout(() => {
+    pendingActionPollTimer = 0
+    void refreshPendingActions(conversationId, true)
+  }, 6000)
+}
+
+async function refreshPendingActions(conversationId = currentConversationId.value, silent = false) {
+  const targetId = String(conversationId || '').trim()
+  if (!targetId) return []
+  const requestVersion = ++pendingActionRequestVersion
+  try {
+    const payload = await pendingActionAPI.list(targetId)
+    if (requestVersion !== pendingActionRequestVersion || targetId !== currentConversationId.value) return []
+    mergePendingActions(payload, true)
+    return actionsFromPayload(payload)
+  } catch (error) {
+    if (!silent && requestVersion === pendingActionRequestVersion && targetId === currentConversationId.value) {
+      notice.value = `业务动作状态加载失败：${error.message}`
+    }
+    return []
+  } finally {
+    if (requestVersion === pendingActionRequestVersion && targetId === currentConversationId.value) schedulePendingActionPolling()
+  }
+}
+
+async function refreshPendingActionStatus(action, silent = false) {
+  const actionId = action?.actionId
+  if (!actionId || actionBusy[actionId]) return null
+  actionBusy[actionId] = 'refresh'
+  try {
+    const updated = await pendingActionAPI.get(actionId)
+    upsertPendingAction(updated)
+    delete actionErrors[actionId]
+    return updated
+  } catch (error) {
+    if (!silent) actionErrors[actionId] = error.message
+    return null
+  } finally {
+    delete actionBusy[actionId]
+    schedulePendingActionPolling()
+  }
+}
+
+async function recoverPendingAction(actionId) {
+  try {
+    const updated = await pendingActionAPI.get(actionId)
+    upsertPendingAction(updated)
+    return updated
+  } catch { return null }
+}
+
+async function confirmPendingAction(action) {
+  const actionId = action?.actionId
+  if (!actionId || actionBusy[actionId] || String(action.status).toUpperCase() !== 'PENDING') return
+  actionBusy[actionId] = 'confirm'
+  delete actionErrors[actionId]
+  try {
+    const updated = await pendingActionAPI.confirm(actionId, action.version)
+    upsertPendingAction(updated)
+    if (String(updated?.status || '').toUpperCase() === 'SUCCEEDED') {
+      const ticketNo = updated?.result?.ticketNo
+      showToast('工单已创建', ticketNo ? `服务端已确认工单号 ${ticketNo}。` : '服务端已返回正式工单结果。', 'success')
+    } else {
+      showToast('动作状态已更新', '服务端尚未返回正式工单成功结果，请刷新状态。', 'error')
+    }
+  } catch (error) {
+    const recovered = await recoverPendingAction(actionId)
+    if (String(recovered?.status || '').toUpperCase() === 'SUCCEEDED') {
+      const ticketNo = recovered.result?.ticketNo
+      showToast('工单已创建', ticketNo ? `已从服务端恢复工单 ${ticketNo} 的成功结果。` : '已从服务端恢复正式工单成功结果。', 'success')
+    } else {
+      actionErrors[actionId] = error.message
+      showToast('确认失败', error.message, 'error')
+    }
+  } finally {
+    delete actionBusy[actionId]
+    schedulePendingActionPolling()
+  }
+}
+
+async function cancelPendingAction(action) {
+  const actionId = action?.actionId
+  if (!actionId || actionBusy[actionId] || String(action.status).toUpperCase() !== 'PENDING') return
+  actionBusy[actionId] = 'cancel'
+  delete actionErrors[actionId]
+  try {
+    const updated = await pendingActionAPI.cancel(actionId, action.version)
+    upsertPendingAction(updated)
+    if (String(updated?.status || '').toUpperCase() === 'CANCELLED') {
+      showToast('草案已取消', '服务端已取消该动作，未创建正式工单。', 'success')
+    } else {
+      showToast('动作状态已更新', '服务端未返回取消结果，请刷新状态。', 'error')
+    }
+  } catch (error) {
+    const recovered = await recoverPendingAction(actionId)
+    if (String(recovered?.status || '').toUpperCase() === 'CANCELLED') {
+      showToast('草案已取消', '已从服务端恢复取消结果。', 'success')
+    } else {
+      actionErrors[actionId] = error.message
+      showToast('取消失败', error.message, 'error')
+    }
+  } finally {
+    delete actionBusy[actionId]
+    schedulePendingActionPolling()
+  }
+}
+
 function startRename(session) { mobileSessionsOpen.value = false; renameTarget.value = session; renameTitle.value = session.title || '新对话' }
 async function confirmRename() {
   try { const updated = await conversationAPI.rename(renameTarget.value.id, renameTitle.value); const index = conversations.value.findIndex(item => item.id === updated.id); if (index >= 0) conversations.value[index] = updated; renameTarget.value = null }
@@ -408,8 +594,10 @@ async function resendEditedMessage() {
   const originalMessage = messages.value[index]
   if (!content || sending.value || !currentConversationId.value || originalMessage?.role !== 'user') return
   const targetConversationId = currentConversationId.value
+  const requestId = originalMessage.requestId || createRequestId()
   const streamController = new AbortController()
   let assistantMessage = null
+  let editedUserMessage = null
   activeStreamController = streamController
   sending.value = true
   uploadingAttachments.value = attachments.value.some(file => Boolean(file.file))
@@ -421,9 +609,10 @@ async function resendEditedMessage() {
       streamController.signal.throwIfAborted()
     }
     uploadingAttachments.value = false
-    assistantMessage = reactive({ role: 'assistant', content: '', citations: [], traces: [], streaming: true, createdAt: new Date().toISOString() })
+    editedUserMessage = reactive({ ...originalMessage, content, attachments: uploaded, requestId, createdAt: new Date().toISOString() })
+    assistantMessage = reactive({ role: 'assistant', content: '', citations: [], traces: [], requestId, streaming: true, createdAt: new Date().toISOString() })
     messages.value.splice(index, messages.value.length - index,
-      { ...originalMessage, content, attachments: uploaded, createdAt: new Date().toISOString() }, assistantMessage)
+      editedUserMessage, assistantMessage)
     copiedMessageIndex.value = -1
     cancelMessageEdit(false)
     await scrollToBottom()
@@ -441,16 +630,21 @@ async function resendEditedMessage() {
           assistantMessage.content = completed.answer || assistantMessage.content
           assistantMessage.citations = completed.citations || []
           assistantMessage.traces = completed.traces || []
+          assistantMessage.requestId = requestId
+          editedUserMessage.requestId = requestId
           assistantMessage.completed = true
           assistantMessage.streaming = false
           queueScrollToBottom()
         }
       },
-      streamController.signal
+      streamController.signal,
+      requestId
     )
     assistantMessage.content = result?.answer || assistantMessage.content
     assistantMessage.citations = result?.citations || assistantMessage.citations
     assistantMessage.traces = result?.traces || assistantMessage.traces
+    assistantMessage.requestId = requestId
+    editedUserMessage.requestId = requestId
     assistantMessage.streaming = false
     try { conversations.value = await conversationAPI.list() }
     catch (refreshError) { notice.value = `回复已重新生成，但会话列表同步失败：${refreshError.message}` }
@@ -458,12 +652,13 @@ async function resendEditedMessage() {
     if (assistantMessage) assistantMessage.streaming = false
     if (error.name !== 'AbortError' && !assistantMessage?.completed) {
       if (!assistantMessage) notice.value = `消息发送失败：${error.message}`
-      else markInterrupted(assistantMessage, error, { kind: 'regenerate', userIndex: index, previousCreatedAt: originalMessage.createdAt })
+      else markInterrupted(assistantMessage, error, { kind: 'regenerate', userIndex: index, previousCreatedAt: originalMessage.createdAt, requestId })
     }
   } finally {
     if (activeStreamController === streamController) activeStreamController = null
     sending.value = false
     uploadingAttachments.value = false
+    await refreshPendingActions(targetConversationId, true)
     await scrollToBottom()
   }
 }
@@ -503,8 +698,10 @@ async function sendMessage() {
   notice.value = ''
   if (!currentConversationId.value && !await createConversation()) { sending.value = false; return }
   const targetConversationId = currentConversationId.value
+  const requestId = createRequestId()
   const streamController = new AbortController()
   let assistantMessage = null
+  let userMessage = null
   let userIndex = -1
   activeStreamController = streamController
   uploadingAttachments.value = attachments.value.length > 0
@@ -517,8 +714,9 @@ async function sendMessage() {
     streamController.signal.throwIfAborted()
     uploadingAttachments.value = false
     userIndex = messages.value.length
-    messages.value.push({ role: 'user', content, citations: [], traces: [], attachments: uploaded, createdAt: new Date().toISOString() })
-    assistantMessage = reactive({ role: 'assistant', content: '', citations: [], traces: [], streaming: true, createdAt: new Date().toISOString() })
+    userMessage = reactive({ role: 'user', content, citations: [], traces: [], attachments: uploaded, requestId, createdAt: new Date().toISOString() })
+    messages.value.push(userMessage)
+    assistantMessage = reactive({ role: 'assistant', content: '', citations: [], traces: [], requestId, streaming: true, createdAt: new Date().toISOString() })
     messages.value.push(assistantMessage)
     attachments.value.forEach(revokeAttachmentPreview); attachments.value = []
     input.value = ''; await scrollToBottom()
@@ -535,16 +733,21 @@ async function sendMessage() {
           assistantMessage.content = completed.answer || assistantMessage.content
           assistantMessage.citations = completed.citations || []
           assistantMessage.traces = completed.traces || []
+          assistantMessage.requestId = requestId
+          userMessage.requestId = requestId
           assistantMessage.completed = true
           assistantMessage.streaming = false
           queueScrollToBottom()
         }
       },
-      streamController.signal
+      streamController.signal,
+      requestId
     )
     assistantMessage.content = result?.answer || assistantMessage.content
     assistantMessage.citations = result?.citations || assistantMessage.citations
     assistantMessage.traces = result?.traces || assistantMessage.traces
+    assistantMessage.requestId = requestId
+    userMessage.requestId = requestId
     assistantMessage.streaming = false
     try {
       conversations.value = await conversationAPI.list()
@@ -558,13 +761,16 @@ async function sendMessage() {
     if (error.name === 'AbortError') {
       if (assistantMessage) assistantMessage.streaming = false
     } else if (!assistantMessage?.completed) {
-      if (assistantMessage) markInterrupted(assistantMessage, error, { kind: 'send', userIndex })
+      if (assistantMessage) markInterrupted(assistantMessage, error, { kind: 'send', userIndex, requestId })
       else notice.value = `消息发送失败：${error.message}`
     }
   }
   finally {
     if (activeStreamController === streamController) activeStreamController = null
-    sending.value = false; uploadingAttachments.value = false; await scrollToBottom()
+    sending.value = false
+    uploadingAttachments.value = false
+    await refreshPendingActions(targetConversationId, true)
+    await scrollToBottom()
   }
 }
 function markInterrupted(message, error, retry) {
@@ -580,6 +786,7 @@ async function discardInterruptedAnswer() {
   try {
     const session = await conversationAPI.get(currentConversationId.value)
     messages.value = session.messages || []
+    await refreshPendingActions(currentConversationId.value, true)
     notice.value = '已同步服务端会话记录。'
   } catch (error) {
     notice.value = `会话同步失败：${error.message}`
@@ -594,6 +801,7 @@ async function retryInterruptedAnswer(index) {
   const user = messages.value[retry?.userIndex]
   if (sending.value || !retry || user?.role !== 'user' || !currentConversationId.value) return
   const conversationId = currentConversationId.value
+  const requestId = retry.requestId || user.requestId || assistant.requestId || createRequestId()
   sending.value = true
   notice.value = ''
   let streamStarted = false
@@ -607,6 +815,7 @@ async function retryInterruptedAnswer(index) {
       : !savedUser || savedUser.createdAt !== retry.previousCreatedAt
     if (alreadySaved) {
       messages.value = savedMessages
+      await refreshPendingActions(conversationId, true)
       notice.value = '已从服务端恢复这轮会话，无需重复发送。'
       return
     }
@@ -621,6 +830,8 @@ async function retryInterruptedAnswer(index) {
     assistant.traces = []
     assistant.interrupted = false
     assistant.streaming = true
+    assistant.requestId = requestId
+    user.requestId = requestId
     const attachmentIds = (user.attachments || []).map(item => item.id)
     const handlers = {
       delta: ({ delta }) => { assistant.content += delta || ''; queueScrollToBottom() },
@@ -628,17 +839,21 @@ async function retryInterruptedAnswer(index) {
         assistant.content = completed.answer || assistant.content
         assistant.citations = completed.citations || []
         assistant.traces = completed.traces || []
+        assistant.requestId = requestId
+        user.requestId = requestId
         assistant.completed = true
         assistant.streaming = false
         queueScrollToBottom()
       }
     }
     const result = retry.kind === 'regenerate'
-      ? await conversationAPI.regenerateStream(conversationId, retry.userIndex, user.content, attachmentIds, handlers, controller.signal)
-      : await conversationAPI.sendStream(conversationId, user.content, attachmentIds, handlers, controller.signal)
+      ? await conversationAPI.regenerateStream(conversationId, retry.userIndex, user.content, attachmentIds, handlers, controller.signal, requestId)
+      : await conversationAPI.sendStream(conversationId, user.content, attachmentIds, handlers, controller.signal, requestId)
     assistant.content = result?.answer || assistant.content
     assistant.citations = result?.citations || assistant.citations
     assistant.traces = result?.traces || assistant.traces
+    assistant.requestId = requestId
+    user.requestId = requestId
     assistant.completed = true
     assistant.streaming = false
     assistant.retry = null
@@ -654,6 +869,7 @@ async function retryInterruptedAnswer(index) {
   } finally {
     if (activeStreamController === controller) activeStreamController = null
     sending.value = false
+    await refreshPendingActions(conversationId, true)
     await scrollToBottom()
   }
 }
@@ -796,6 +1012,7 @@ function queueScrollToBottom() {
 </script>
 
 <style scoped lang="scss">
+.pending-action-stack{max-width:920px;margin:0 auto 8px}.pending-action-stack>header{width:min(820px,calc(100% - 52px));display:flex;align-items:center;justify-content:space-between;margin:0 auto 9px;color:var(--text-muted);font-size:11px;font-weight:750}.pending-action-stack>header small{color:var(--text-soft);font-size:9px;font-weight:600}@media(max-width:760px){.pending-action-stack>header{width:100%}}
 .conversation-workspace{--session-panel-width:286px;--context-panel-width:330px;position:relative;height:calc(100dvh - 68px);min-height:0;display:grid;grid-template-columns:var(--session-panel-width) minmax(480px,1fr) var(--context-panel-width);background:var(--surface);overflow:hidden;transition:grid-template-columns .22s cubic-bezier(.2,.8,.2,1)}.conversation-workspace.sessions-collapsed{--session-panel-width:48px}.conversation-workspace.context-collapsed{--context-panel-width:48px}.session-sidebar,.context-sidebar{min-width:0;min-height:0;background:var(--surface-subtle)}.session-sidebar{display:flex;flex-direction:column;padding:18px 14px;border-right:1px solid var(--border-color)}.session-heading{display:flex;align-items:center;justify-content:space-between;padding:0 5px 14px}#conversation-drawer-title{font-size:15px;font-weight:750}.session-heading-actions{display:flex;align-items:center;gap:4px}.session-heading-actions button{width:34px;height:34px;display:grid;place-items:center;color:#fff;background:var(--primary);border:0;border-radius:8px}.session-heading-actions .drawer-close{display:none;color:var(--text-muted);background:transparent;border:1px solid var(--border-color)}.session-heading svg{width:18px}.session-search{display:flex;align-items:center;gap:8px;padding:0 10px;background:var(--surface);border:1px solid var(--border-color);border-radius:8px}.session-search svg{width:17px;color:var(--text-soft)}.session-search input{width:100%;height:40px;color:var(--text-color);background:transparent;border:0;outline:0;font-size:13px}.session-list{min-height:0;flex:1;overflow:auto}.session-group>article{width:100%;display:grid;grid-template-columns:minmax(0,1fr) 58px;align-items:stretch;overflow:hidden;color:var(--text-muted);border-radius:8px}.session-group>article:hover{background:var(--surface)}.session-group>article.active{color:var(--primary);background:var(--primary-soft)}.session-open{min-width:0;display:grid;grid-template-columns:19px minmax(0,1fr);gap:9px;align-items:start;padding:11px 8px 11px 10px;color:inherit;background:transparent;border:0;border-radius:8px;text-align:left}.session-open:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}.session-icon{width:18px;margin-top:2px}.session-copy{min-width:0}.title-viewport{width:100%;display:block;overflow:hidden;white-space:nowrap}.title-track{display:block;width:100%;overflow:hidden;font-size:13px;text-overflow:ellipsis;white-space:nowrap}.title-viewport.is-overflowing:hover .title-track,.session-open:focus-visible .title-viewport.is-overflowing .title-track{overflow:visible;text-overflow:clip;animation:titleMarquee 6s ease-in-out .65s infinite alternate}.session-copy small{display:block;margin-top:5px;overflow:hidden;color:var(--text-soft);font-size:11px;text-overflow:ellipsis;white-space:nowrap}.session-actions{width:58px;display:flex;align-items:center;justify-content:flex-end;gap:2px;align-self:center;padding-left:4px;border-left:1px solid color-mix(in srgb,var(--border-color) 78%,transparent)}.session-actions button{width:26px;height:26px;display:grid;place-items:center;color:var(--text-soft);background:transparent;border:0;border-radius:5px;transition:color .16s ease,background .16s ease}.session-list article:hover .session-actions button,.session-list article.active .session-actions button{color:var(--text-muted)}.session-actions button:hover{color:var(--primary)!important;background:var(--surface)}.session-actions button:last-child:hover{color:var(--danger)!important;background:#fff0ed}.session-actions button:focus-visible{outline:2px solid var(--primary);outline-offset:1px}.session-actions svg{width:15px}.empty-list{min-height:180px;display:grid;place-content:center;justify-items:center;gap:7px;padding:28px 8px;color:var(--text-soft);font-size:12px;text-align:center}.empty-list svg{width:23px}.empty-list strong{color:var(--text-muted);font-size:13px}.mobile-session-backdrop{display:none}
 .session-sidebar-content,.context-sidebar-content{min-width:0;min-height:0;height:100%}.session-sidebar-content{display:flex;flex-direction:column}.collapsed-rail{display:none}.session-sidebar.collapsed,.context-sidebar.collapsed{padding:8px 6px}.session-sidebar.collapsed .session-sidebar-content,.context-sidebar.collapsed .context-sidebar-content{display:none}.session-sidebar.collapsed .collapsed-rail,.context-sidebar.collapsed .collapsed-rail{width:100%;display:flex;flex-direction:column;align-items:center;gap:8px;padding:10px 2px;color:var(--text-soft);background:transparent;border:0;border-radius:7px;font-size:10px;letter-spacing:.08em}.session-sidebar.collapsed .collapsed-rail:hover,.context-sidebar.collapsed .collapsed-rail:hover{color:var(--primary);background:var(--primary-soft)}.collapsed-rail svg{width:19px}.history-scope{display:grid;grid-template-columns:1fr 1fr;gap:3px;margin-top:10px;padding:3px;background:var(--surface-strong);border-radius:8px}.history-scope button{min-height:30px;padding:0 7px;color:var(--text-soft);background:transparent;border:0;border-radius:6px;font-size:11px;font-weight:700}.history-scope button:hover{color:var(--text-color)}.history-scope button.active{color:var(--text-color);background:var(--surface);box-shadow:0 1px 3px rgba(23,32,51,.1)}.history-summary{display:flex;align-items:center;justify-content:space-between;padding:15px 6px 7px;color:var(--text-soft);font-size:10px}.history-summary small{min-width:18px;text-align:right}.session-group{margin:0}.session-group+.session-group{margin-top:13px}.session-group h3{display:flex;align-items:center;justify-content:space-between;margin:0;padding:7px 7px 4px;color:var(--text-soft);font-size:10px;font-weight:700}.session-group h3 span{font-weight:inherit}.session-group h3 small{font-size:9px;font-weight:600}.panel-toggle{position:absolute;top:50%;z-index:12;width:22px;height:48px;display:grid;place-items:center;padding:0;opacity:0;color:var(--text-soft);background:color-mix(in srgb,var(--surface) 82%,transparent);border:1px solid transparent;border-radius:999px;box-shadow:none;backdrop-filter:blur(8px);transform:translateY(-50%);transition:left .22s cubic-bezier(.2,.8,.2,1),right .22s cubic-bezier(.2,.8,.2,1),opacity .16s ease,color .16s ease,background-color .16s ease,border-color .16s ease}.panel-toggle:hover,.panel-toggle:focus-visible,.session-sidebar:hover+.session-panel-toggle,.context-sidebar:hover+.context-panel-toggle{opacity:1}.panel-toggle:hover,.panel-toggle:focus-visible{color:var(--primary);background:color-mix(in srgb,var(--surface) 96%,transparent);border-color:color-mix(in srgb,var(--primary) 22%,var(--border-color))}.panel-toggle:focus-visible{outline:2px solid color-mix(in srgb,var(--primary) 38%,transparent);outline-offset:2px}.panel-toggle svg{width:14px;height:26px}.session-panel-toggle{left:calc(var(--session-panel-width) - 11px)}.context-panel-toggle{right:calc(var(--context-panel-width) - 11px)}
 .conversation-workspace.sessions-collapsed .session-panel-toggle{background:transparent;border-color:transparent;backdrop-filter:none}.conversation-workspace.sessions-collapsed .session-panel-toggle::before{content:"";position:absolute;inset:0 0 0 50%;background:color-mix(in srgb,var(--surface) 88%,transparent);border:1px solid color-mix(in srgb,var(--border-color) 82%,transparent);border-left:0;border-radius:0 999px 999px 0;backdrop-filter:blur(8px);transition:background-color .16s ease,border-color .16s ease}.conversation-workspace.sessions-collapsed .session-panel-toggle:hover,.conversation-workspace.sessions-collapsed .session-panel-toggle:focus-visible{background:transparent;border-color:transparent}.conversation-workspace.sessions-collapsed .session-panel-toggle:hover::before,.conversation-workspace.sessions-collapsed .session-panel-toggle:focus-visible::before{background:color-mix(in srgb,var(--surface) 98%,transparent);border-color:color-mix(in srgb,var(--primary) 22%,var(--border-color))}.conversation-workspace.sessions-collapsed .session-panel-toggle svg{position:relative;z-index:1;width:8px;transform:translateX(5px)}.context-sidebar.collapsed .collapsed-rail{padding-inline:0;letter-spacing:0}.context-sidebar.collapsed .collapsed-rail span{display:block;white-space:nowrap}

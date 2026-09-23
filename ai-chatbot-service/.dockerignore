@@ -1,0 +1,8 @@
+target/
+runtime-data/
+.idea/
+.vscode/
+*.log
+.env
+.env.*
+!.env.example

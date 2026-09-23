@@ -1,6 +1,7 @@
 package com.chatbot.ai.service;
 
 import com.chatbot.ai.domain.knowledge.DocumentStatus;
+import com.chatbot.ai.domain.auth.AuthenticatedUser;
 import com.chatbot.ai.domain.workflow.WorkflowNode;
 import com.chatbot.ai.repository.CustomerServiceDataRepository;
 import com.chatbot.ai.repository.KnowledgeCatalogRepository;
@@ -14,14 +15,21 @@ import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.Set;
+import java.util.function.Supplier;
 
 import static org.springframework.ai.chat.client.advisor.AbstractChatMemoryAdvisor.CHAT_MEMORY_CONVERSATION_ID_KEY;
 
@@ -31,19 +39,24 @@ public class WorkflowNodeExecutor {
     private final KnowledgeCatalogRepository catalog;
     private final CustomerServiceDataRepository businessData;
     private final ScenarioRepository scenarios;
+    private final BusinessAuthorizationService authorization;
     private final ObjectProvider<VectorStore> vectorStore;
     private final ObjectProvider<ChatClient> model;
     private final ObjectMapper objectMapper;
+    @Value("${app.workflow.external-timeout:PT30S}")
+    private Duration externalTimeout = Duration.ofSeconds(30);
 
     public WorkflowNodeExecutor(KnowledgeCatalogRepository catalog,
                                 CustomerServiceDataRepository businessData,
                                 ScenarioRepository scenarios,
+                                BusinessAuthorizationService authorization,
                                 ObjectProvider<VectorStore> vectorStore,
                                 @Qualifier("generalChatClient") ObjectProvider<ChatClient> model,
                                 ObjectMapper objectMapper) {
         this.catalog = catalog;
         this.businessData = businessData;
         this.scenarios = scenarios;
+        this.authorization = authorization;
         this.vectorStore = vectorStore;
         this.model = model;
         this.objectMapper = objectMapper;
@@ -51,13 +64,13 @@ public class WorkflowNodeExecutor {
 
     public Map<String, Object> execute(WorkflowNode node, JsonNode config,
                                        Map<String, Object> values, String requestKnowledgeBaseId,
-                                       String scenarioCode) {
+                                       String scenarioCode, AuthenticatedUser actor) {
         return switch (node.getType()) {
             case "input", "output" -> new LinkedHashMap<>(values);
             case "condition" -> condition(config, values);
-            case "knowledge" -> knowledge(config, values, requestKnowledgeBaseId);
-            case "tool" -> tool(config, values, scenarioCode);
-            case "model" -> model(config, values);
+            case "knowledge" -> timed("知识检索", () -> knowledge(config, values, requestKnowledgeBaseId));
+            case "tool" -> tool(config, values, scenarioCode, actor);
+            case "model" -> timed("模型调用", () -> model(config, values));
             default -> throw new IllegalArgumentException("当前节点类型没有可执行实现：" + node.getType());
         };
     }
@@ -118,7 +131,8 @@ public class WorkflowNodeExecutor {
                 "matches", matches, "matchCount", matches.size());
     }
 
-    private Map<String, Object> tool(JsonNode config, Map<String, Object> values, String scenarioCode) {
+    private Map<String, Object> tool(JsonNode config, Map<String, Object> values, String scenarioCode,
+                                     AuthenticatedUser actor) {
         String operation = config.path("operation").asText("").trim();
         if (operation.isEmpty()) {
             throw new IllegalArgumentException("业务工具节点未配置 operation。支持只读查询：queryOrder、queryCustomerEntitlements、queryBusinessSubject、queryServiceTickets。");
@@ -150,12 +164,28 @@ public class WorkflowNodeExecutor {
         if (identifier.length() > 80 || !identifier.matches("[A-Za-z0-9-]+")) {
             throw new IllegalArgumentException("业务工具参数格式无效。");
         }
+        if (authorization == null) throw new IllegalStateException("业务授权服务未启用");
         Object result = switch (operation) {
-            case "queryOrder" -> businessData.findOrder(identifier).orElse(null);
-            case "queryCustomerEntitlements" -> businessData.findCustomer(identifier).orElse(null);
-            case "queryBusinessSubject" -> businessData.findBusinessSubject(identifier).orElse(null);
-            case "queryServiceTickets" -> businessData.findTickets(identifier,
-                    values.get("orderNo") == null ? null : String.valueOf(values.get("orderNo")));
+            case "queryOrder" -> authorization.requireOrderAccess(actor, identifier);
+            case "queryCustomerEntitlements" -> {
+                authorization.requireBusinessSubjectAccess(actor, identifier);
+                yield businessData.findCustomer(identifier).orElse(null);
+            }
+            case "queryBusinessSubject" -> {
+                authorization.requireBusinessSubjectAccess(actor, identifier);
+                yield businessData.findBusinessSubject(identifier).orElse(null);
+            }
+            case "queryServiceTickets" -> {
+                authorization.requireBusinessSubjectAccess(actor, identifier);
+                String orderNo = values.get("orderNo") == null ? null : String.valueOf(values.get("orderNo"));
+                if (orderNo != null && !orderNo.isBlank()) {
+                    var order = authorization.requireOrderAccess(actor, orderNo);
+                    if (!identifier.equals(order.customerNo())) {
+                        throw new IllegalArgumentException("订单不属于所选客户");
+                    }
+                }
+                yield businessData.findTickets(identifier, orderNo);
+            }
             default -> null;
         };
         Map<String, Object> output = new LinkedHashMap<>();
@@ -190,6 +220,30 @@ public class WorkflowNodeExecutor {
             current = map.get(part);
         }
         return current;
+    }
+
+    private <T> T timed(String operation, Supplier<T> supplier) {
+        CompletableFuture<T> future = CompletableFuture.supplyAsync(supplier);
+        try {
+            return future.get(Math.max(1, externalTimeout.toMillis()), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException exception) {
+            // Cancellation is best effort; a late provider result has no reference to WorkflowRun
+            // and therefore cannot overwrite the already-failed durable checkpoint.
+            future.cancel(true);
+            throw new IllegalArgumentException(operation + "超时（" + externalTimeout.toSeconds() + " 秒），已停止后续节点。", exception);
+        } catch (InterruptedException exception) {
+            future.cancel(true);
+            Thread.currentThread().interrupt();
+            throw new IllegalArgumentException(operation + "被中断，已停止后续节点。", exception);
+        } catch (ExecutionException exception) {
+            Throwable cause = exception.getCause();
+            if (cause instanceof RuntimeException runtimeException) throw runtimeException;
+            throw new IllegalStateException(operation + "失败", cause);
+        }
+    }
+
+    void setExternalTimeoutForTest(Duration timeout) {
+        this.externalTimeout = timeout;
     }
 
     private String shorten(String value, int limit) {

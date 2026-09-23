@@ -2,6 +2,7 @@ package com.chatbot.ai.service;
 
 import com.chatbot.ai.domain.chat.ChatCitation;
 import com.chatbot.ai.domain.chat.ChatTraceStep;
+import com.chatbot.ai.domain.auth.AuthenticatedUser;
 import com.chatbot.ai.domain.knowledge.DocumentStatus;
 import com.chatbot.ai.domain.scenario.ScenarioDefinition;
 import com.chatbot.ai.repository.KnowledgeCatalogRepository;
@@ -28,8 +29,14 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.regex.Pattern;
 
 import static com.chatbot.ai.service.ToolTraceRecorder.TRACE_ID_CONTEXT_KEY;
@@ -53,6 +60,8 @@ public class KnowledgeChatService {
     private final ToolTraceRecorder toolTraceRecorder;
     private final boolean aiEnabled;
     private final String modelName;
+    @Value("${app.ai.call-timeout-seconds:45}")
+    private long modelTimeoutSeconds = 45;
 
     public KnowledgeChatService(KnowledgeCatalogRepository catalogRepository,
                                 ScenarioRepository scenarioRepository,
@@ -85,7 +94,15 @@ public class KnowledgeChatService {
 
     public AnswerResult answer(String conversationId, String knowledgeBaseId, String scenarioCode,
                                String question, List<Media> media) {
-        PreparedAnswer prepared = prepare(conversationId, knowledgeBaseId, scenarioCode, question, media);
+        return answer(conversationId, knowledgeBaseId, scenarioCode, question, media, null,
+                UUID.randomUUID().toString());
+    }
+
+    public AnswerResult answer(String conversationId, String knowledgeBaseId, String scenarioCode,
+                               String question, List<Media> media, AuthenticatedUser actor,
+                               String requestId) {
+        PreparedAnswer prepared = prepare(conversationId, knowledgeBaseId, scenarioCode, question, media,
+                actor, requestId);
         if (prepared.immediateResult() != null) {
             return prepared.immediateResult();
         }
@@ -122,12 +139,24 @@ public class KnowledgeChatService {
     }
 
     public Flux<AnswerStreamEvent> streamAnswer(String conversationId,
-                                                String knowledgeBaseId,
-                                                String scenarioCode,
-                                                String question,
-                                                List<Media> media) {
+                                                 String knowledgeBaseId,
+                                                 String scenarioCode,
+                                                 String question,
+                                                 List<Media> media) {
+        return streamAnswer(conversationId, knowledgeBaseId, scenarioCode, question, media, null,
+                UUID.randomUUID().toString());
+    }
+
+    public Flux<AnswerStreamEvent> streamAnswer(String conversationId,
+                                                 String knowledgeBaseId,
+                                                 String scenarioCode,
+                                                 String question,
+                                                 List<Media> media,
+                                                 AuthenticatedUser actor,
+                                                 String requestId) {
         return Flux.defer(() -> {
-            PreparedAnswer prepared = prepare(conversationId, knowledgeBaseId, scenarioCode, question, media);
+            PreparedAnswer prepared = prepare(conversationId, knowledgeBaseId, scenarioCode, question, media,
+                    actor, requestId);
             if (prepared.immediateResult() != null) {
                 AnswerResult immediate = prepared.immediateResult();
                 Flux<AnswerStreamEvent> delta = immediate.answer() == null || immediate.answer().isEmpty()
@@ -169,6 +198,7 @@ public class KnowledgeChatService {
             }
 
             return modelContent
+                    .timeout(Duration.ofSeconds(Math.max(1, modelTimeoutSeconds)))
                     .filter(chunk -> chunk != null && !chunk.isEmpty())
                     .doOnNext(fullAnswer::append)
                     .map(chunk -> (AnswerStreamEvent) new AnswerDelta(chunk))
@@ -192,14 +222,29 @@ public class KnowledgeChatService {
     }
 
     private String callModel(PreparedAnswer prepared, String conversationId, String traceId) {
-        return requestSpec(prepared, conversationId, traceId)
-                .call()
-                .content();
+        CompletableFuture<String> call = CompletableFuture.supplyAsync(() ->
+                requestSpec(prepared, conversationId, traceId).call().content());
+        try {
+            return call.get(Math.max(1, modelTimeoutSeconds), TimeUnit.SECONDS);
+        } catch (TimeoutException exception) {
+            call.cancel(true);
+            throw new ResponseStatusException(HttpStatus.GATEWAY_TIMEOUT, "模型调用超时，已停止本轮处理");
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            call.cancel(true);
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "模型调用被中断");
+        } catch (ExecutionException exception) {
+            Throwable cause = exception.getCause();
+            if (cause instanceof RuntimeException runtimeException) throw runtimeException;
+            throw new IllegalStateException("模型调用失败", cause);
+        }
     }
 
     private ChatClient.ChatClientRequestSpec requestSpec(PreparedAnswer prepared,
                                                          String conversationId,
                                                          String traceId) {
+        Map<String, Object> toolContext = new LinkedHashMap<>(prepared.toolContext());
+        toolContext.put(TRACE_ID_CONTEXT_KEY, traceId);
         ChatClient.ChatClientRequestSpec request = prepared.chatClient().prompt()
                 .user(user -> {
                     user.text(prepared.userPrompt());
@@ -208,7 +253,7 @@ public class KnowledgeChatService {
                     }
                 })
                 .advisors(advisor -> advisor.param(CHAT_MEMORY_CONVERSATION_ID_KEY, conversationId))
-                .toolContext(Map.of(TRACE_ID_CONTEXT_KEY, traceId));
+                .toolContext(toolContext);
         if (!prepared.toolCallbacks().isEmpty()) {
             request.tools(prepared.toolCallbacks().toArray(FunctionCallback[]::new));
         }
@@ -258,7 +303,9 @@ public class KnowledgeChatService {
                                    String knowledgeBaseId,
                                    String scenarioCode,
                                    String question,
-                                   List<Media> media) {
+                                   List<Media> media,
+                                   AuthenticatedUser actor,
+                                   String requestId) {
         List<Media> safeMedia = media == null ? List.of() : List.copyOf(media);
         long chainStartedAt = System.nanoTime();
         List<ChatTraceStep> traces = new ArrayList<>();
@@ -289,20 +336,37 @@ public class KnowledgeChatService {
                             ? "本轮未选择知识库，不执行向量检索；当前场景不开放业务工具"
                             : "本轮未选择知识库，不执行向量检索；可按业务场景调用已授权工具",
                     "completed", 0));
-            String prompt = scenarioInstruction + "\n\n用户问题：\n" + question;
+            toolCallbacks = withoutPolicySensitiveTools(toolCallbacks);
+            String prompt = scenarioInstruction + "\n\n用户问题：\n" + question
+                    + "\n\n本轮没有知识证据：不得断言退款、退换货、合同或其他政策资格；"
+                    + "可以调用已授权的只读工具返回订单等客观业务事实。";
             return new PreparedAnswer(selectedClient, prompt, safeMedia, false, 0, List.of(), traces,
-                    toolCallbacks, chainStartedAt, null);
+                    toolCallbacks, trustedContext(actor, conversationId, requestId,
+                    normalizedScenarioCode, false), chainStartedAt, null);
         }
 
-        VectorStore vectorStore = vectorStoreProvider.getIfAvailable();
         ChatClient chatClient = selectedClientProvider.getIfAvailable();
-        if (vectorStore == null || chatClient == null) {
-            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "AI 服务初始化失败");
+        if (chatClient == null) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, unavailableMessage);
         }
         boolean hasReadyDocument = catalogRepository.findDocuments(knowledgeBaseId).stream()
                 .anyMatch(document -> document.getStatus() == DocumentStatus.READY);
         if (!hasReadyDocument) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "当前知识库还没有完成索引的文档");
+            traces.add(trace("retrieval", "知识证据不可用",
+                    "所选知识库尚无已完成索引的文档；继续处理已授权的只读业务查询",
+                    "completed", 0));
+            toolCallbacks = withoutPolicySensitiveTools(toolCallbacks);
+            String noEvidencePrompt = scenarioInstruction + "\n\n用户问题：\n" + question + "\n\n"
+                    + "所选知识库尚无可用证据。必须明确拒绝政策性断言；"
+                    + "但若问题包含订单、客户或工单查询，可调用已授权的只读工具，并仅返回工具证实的业务事实。"
+                    + "若创建工单所需字段不足，只追问缺失字段。";
+            return new PreparedAnswer(chatClient, noEvidencePrompt, safeMedia, false, 0,
+                    List.of(), traces, toolCallbacks, trustedContext(actor, conversationId, requestId,
+                    normalizedScenarioCode, false), chainStartedAt, null);
+        }
+        VectorStore vectorStore = vectorStoreProvider.getIfAvailable();
+        if (vectorStore == null) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "向量检索服务初始化失败");
         }
 
         traces.add(trace("scope", "限定知识库范围",
@@ -322,12 +386,14 @@ public class KnowledgeChatService {
             traces.add(trace("retrieval", "向量检索",
                     "TopK=6，阈值=0.45；没有片段达到相关度要求",
                     "completed", retrievalDuration));
-            traces.add(trace("complete", "链路结束",
-                    "未调用模型，也未触发业务工具",
-                    "completed", elapsedMs(chainStartedAt)));
-            AnswerResult result = new AnswerResult("当前知识库中没有找到足够相关的内容。", List.of(), traces);
-            return new PreparedAnswer(null, null, safeMedia, true, 0, List.of(), traces,
-                    List.of(), chainStartedAt, result);
+            toolCallbacks = withoutPolicySensitiveTools(toolCallbacks);
+            String noEvidencePrompt = scenarioInstruction + "\n\n用户问题：\n" + question + "\n\n"
+                    + "所选知识库没有召回足够相关的证据。必须明确拒绝政策性断言；"
+                    + "但若问题包含订单、客户或工单查询，可调用已授权的只读工具，并仅返回工具证实的业务事实。"
+                    + "若创建工单所需字段不足，只追问缺失字段。";
+            return new PreparedAnswer(chatClient, noEvidencePrompt, safeMedia, false, 0,
+                    List.of(), traces, toolCallbacks, trustedContext(actor, conversationId, requestId,
+                    normalizedScenarioCode, false), chainStartedAt, null);
         }
 
         traces.add(trace("retrieval", "向量检索",
@@ -335,27 +401,33 @@ public class KnowledgeChatService {
                 "completed", retrievalDuration));
 
         StringBuilder context = new StringBuilder();
-        Map<String, ChatCitation> uniqueCitations = new LinkedHashMap<>();
-        for (int index = 0; index < retrieved.size(); index++) {
-            Document document = retrieved.get(index);
+        List<ChatCitation> citations = new ArrayList<>();
+        Set<String> seenChunks = new HashSet<>();
+        for (Document document : retrieved) {
             Map<String, Object> metadata = document.getMetadata();
             String documentId = String.valueOf(metadata.getOrDefault("document_id", ""));
+            String chunkId = String.valueOf(metadata.getOrDefault("chunk_id", ""));
             String fileName = String.valueOf(metadata.getOrDefault("file_name", "知识文档"));
             Integer pageNumber = parsePageNumber(metadata);
             String excerpt = excerpt(document.getText());
-            context.append("[资料 ").append(index + 1).append("] 来源：")
+            String evidenceKey = chunkId.isBlank()
+                    ? documentId + ":" + pageNumber + ":" + Integer.toHexString(excerpt.hashCode())
+                    : chunkId;
+            if (!seenChunks.add(evidenceKey)) continue;
+            int sourceNumber = citations.size() + 1;
+            context.append("[资料 ").append(sourceNumber).append("] 来源：")
                     .append(fileName);
             if (pageNumber != null) {
                 context.append("，第 ").append(pageNumber).append(" 页");
             }
             context.append("\n").append(document.getText()).append("\n\n");
-            uniqueCitations.putIfAbsent(documentId + ":" + pageNumber,
-                    ChatCitation.builder()
-                            .documentId(documentId)
-                            .fileName(fileName)
-                            .pageNumber(pageNumber)
-                            .excerpt(excerpt)
-                            .build());
+            citations.add(ChatCitation.builder()
+                    .documentId(documentId)
+                    .chunkId(chunkId)
+                    .fileName(fileName)
+                    .pageNumber(pageNumber)
+                    .excerpt(excerpt)
+                    .build());
         }
 
         String userPrompt = """
@@ -371,9 +443,9 @@ public class KnowledgeChatService {
                 请只依据以上资料回答。如果资料不足，请明确说明不知道。回答应简洁、准确，并在相关内容后用 [资料 N] 标注来源。
                 """.formatted(scenarioInstruction, question, context);
 
-        return new PreparedAnswer(chatClient, userPrompt, safeMedia, true, retrieved.size(),
-                new ArrayList<>(uniqueCitations.values()), traces, toolCallbacks,
-                chainStartedAt, null);
+        return new PreparedAnswer(chatClient, userPrompt, safeMedia, true, citations.size(),
+                citations, traces, toolCallbacks, trustedContext(actor, conversationId, requestId,
+                normalizedScenarioCode, true), chainStartedAt, null);
     }
 
     private AnswerResult completeSuccessfulAnswer(PreparedAnswer prepared,
@@ -410,6 +482,23 @@ public class KnowledgeChatService {
         }
         return new AnswerResult(answer, new ArrayList<>(prepared.citations()),
                 new ArrayList<>(prepared.traces()));
+    }
+
+    private List<FunctionCallback> withoutPolicySensitiveTools(List<FunctionCallback> callbacks) {
+        if (callbacks == null || callbacks.isEmpty()) return List.of();
+        return callbacks.stream()
+                .filter(callback -> !"checkAfterSalesEligibility".equals(callback.getName()))
+                .toList();
+    }
+
+    private Map<String, Object> trustedContext(AuthenticatedUser actor,
+                                               String conversationId,
+                                               String requestId,
+                                               String scenarioCode,
+                                               boolean policyEvidenceAvailable) {
+        if (actor == null) return Map.of();
+        return TrustedToolContext.values(actor, conversationId, null, requestId,
+                scenarioCode, policyEvidenceAvailable);
     }
 
     private ChatTraceStep trace(String phase, String title, String detail, String status, long durationMs) {
@@ -497,6 +586,7 @@ public class KnowledgeChatService {
                 允许的业务工具：%s
                 业务边界：%s
                 必须遵循以上场景配置。不得调用未列出的业务工具，不得绕过业务边界。
+                若工具或草案需要订单号、客户编号或其他必填字段，而用户尚未提供，只能追问缺失字段；不得猜测、编造，也不得使用客服操作员 userId 代替客户编号。
                 """.formatted(scenario.getName(), code, scenario.getSummary(), scenario.getKnowledgeMode(),
                 process, tools, scenario.getGuardrail()).trim();
     }
@@ -509,6 +599,7 @@ public class KnowledgeChatService {
                                   List<ChatCitation> citations,
                                   List<ChatTraceStep> traces,
                                   List<FunctionCallback> toolCallbacks,
+                                  Map<String, Object> toolContext,
                                   long chainStartedAt,
                                   AnswerResult immediateResult) {
     }

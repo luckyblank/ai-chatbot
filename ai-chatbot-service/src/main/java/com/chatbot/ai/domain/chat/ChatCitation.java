@@ -11,8 +11,8 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class ChatCitation {
     private String documentId;
+    private String chunkId;
     private String fileName;
     private Integer pageNumber;
     private String excerpt;
 }
-

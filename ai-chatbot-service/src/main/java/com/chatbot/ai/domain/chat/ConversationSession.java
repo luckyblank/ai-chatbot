@@ -15,6 +15,11 @@ import java.util.List;
 @AllArgsConstructor
 public class ConversationSession {
     private String id;
+    /**
+     * Authenticated operator that created the conversation. Legacy rows/files may
+     * be null and are deliberately visible only to administrators.
+     */
+    private String ownerId;
     private String knowledgeBaseId;
     private String scenarioCode;
     private String title;
