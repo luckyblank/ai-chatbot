@@ -35,6 +35,8 @@ docker compose --env-file .env.docker -f compose.yaml ps
 
 访问 `http://localhost:15175`。Web、后端和 MySQL 的固定默认宿主端口分别为 `15175`、`18082`、`13318`；只有主动修改 `.env.docker` 中的 `SERVICE_WEB_PORT`、`SERVICE_BACKEND_PORT`、`SERVICE_MYSQL_PORT` 才会变化。默认只绑定 `127.0.0.1`，不会发布到局域网；三个容器默认命名为 `ai-chatbot-mysql`、`ai-chatbot-backend`、`ai-chatbot-web`。不要使用 `down`、`prune`、`rm` 或 `rmi` 清理用户已有资源。
 
+如需从另一台物理机连接 Docker MySQL，可只设置 `SERVICE_MYSQL_BIND_ADDRESS`（例如宿主机局域网 IPv4，或 `0.0.0.0`）；Web 和后端仍由 `SERVICE_BIND_ADDRESS=127.0.0.1` 限制为本机访问。修改 MySQL 的宿主机端口绑定需要重建 MySQL 容器，但不会删除数据卷。详见[局域网 MySQL 连接](docs/技术部署与维护.md#局域网-mysql-连接可选)。
+
 Docker 与本机开发 MySQL 的业务库名现统一为 `ai_chatbot`（下划线）；Compose 项目和容器名前缀仍是 `ai-chatbot`（连字符）。本机独立 MySQL80 的旧 `ai-demo` 已用 [数据库迁移脚本](database/001-migrate-local-ai-demo-to-ai_chatbot.sql) 复制当前项目需要的 9 张表，新后端启动后共 12 张表；Docker 业务库也已迁移到 `ai_chatbot`。核验后，两个实例中的冗余旧业务库已删除，隔离测试库保留，完整旧库备份保存在 Git 忽略目录。这里只统一**库名**，没有在本机与 Docker 之间同步数据；其他已有数据卷不能只改环境变量，须先备份、迁移和核对。旧版 `.env` 的 `DEMO_*` 键需改为对应的 `SERVICE_*`；Docker AI 仅从 `SERVICE_AI_ENABLED`、`SERVICE_AI_DASHSCOPE_API_KEY` 显式配置。现有 MySQL 容器的首次初始化变量由 `SERVICE_MYSQL_INIT_DATABASE` 保持原值，后端使用 `SERVICE_DB_NAME=ai_chatbot`；全新部署无需设置初始化覆盖值。复用旧数据卷时设置 `SERVICE_EXISTING_VOLUMES=true` 和两个旧卷名，并避免两个 MySQL 容器同时挂载同一卷。细节见[技术部署与维护](docs/技术部署与维护.md)。
 
 `SERVICE_AI_ENABLED=false` 时仍可运行不依赖模型的“售后订单审批演示”工作流；要演示真实客服对话和模型准备草案，在 Docker `.env.docker` 中显式设置 `SERVICE_AI_ENABLED=true` 与 `SERVICE_AI_DASHSCOPE_API_KEY`。页面左下角显示后端的 AI 配置状态；“参数已配置”只代表开关和密钥已填写，不代表外部模型已连通。完整验收记录见 [客服 Agent 可靠业务闭环 A 实施记录](docs/客服Agent可靠业务闭环-A实施记录.md)。

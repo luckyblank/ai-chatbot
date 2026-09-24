@@ -15,7 +15,7 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
     ports:
-      - "${SERVICE_BIND_ADDRESS:-127.0.0.1}:${SERVICE_MYSQL_PORT:-13318}:3306"
+      - "${SERVICE_MYSQL_BIND_ADDRESS:-${SERVICE_BIND_ADDRESS:-127.0.0.1}}:${SERVICE_MYSQL_PORT:-13318}:3306"
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
