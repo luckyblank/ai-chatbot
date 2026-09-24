@@ -1,0 +1,7 @@
+# 数据库脚本
+
+`001-migrate-local-ai-demo-to-ai_chatbot.sql` 用于独立的本机 MySQL80（默认 `localhost:3306`），**不用于 Docker MySQL**。它创建 `ai_chatbot`，从旧 `ai-demo` 复制当前后端仍使用的 9 张业务表，并输出两边准确行数；其余 3 张新表由后端首次连接时初始化。脚本只运行一次，若目标库已存在会报错，不能使用 MySQL 客户端的 `--force` 跳过错误。
+
+执行前须停止连接旧库的本机后端并完整备份 `ai-demo`。执行后逐表校验行数、校验值和关键索引，启动后端核对业务结果，再按实际连接情况决定是否删除旧库。脚本不执行 `DROP DATABASE`，也不把 Docker 数据同步到本机。仓库忽略 `runtime-data/db-backups/` 下的真实数据备份，不要将其加入 Git。
+
+全新 Docker 部署由 Compose 的 `MYSQL_DATABASE` 初始化同名库；已有数据卷不会因为修改库名变量自动迁移，详情见[技术部署与维护](../docs/技术部署与维护.md)。
