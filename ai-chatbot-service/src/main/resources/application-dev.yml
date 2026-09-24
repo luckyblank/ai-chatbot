@@ -4,7 +4,7 @@ spring:
     # is ai-chatbot-service. Keep this local file out of Git.
     import: optional:file:./.env.development[.properties]
   datasource:
-    url: ${DB_URL:jdbc:mysql://localhost:3306/ai_chatbot?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=false&serverTimezone=Asia/Shanghai}
+    url: ${DB_URL:jdbc:mysql://localhost:3306/ai-chatbot?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=false&serverTimezone=Asia/Shanghai}
     username: ${DB_USERNAME:root}
     password: ${DB_PASSWORD:123456}
 

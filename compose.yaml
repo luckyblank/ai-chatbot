@@ -6,7 +6,7 @@ services:
     image: mysql:8.0.45
     restart: unless-stopped
     environment:
-      MYSQL_DATABASE: ${SERVICE_DB_NAME:-ai_chatbot}
+      MYSQL_DATABASE: ${SERVICE_DB_NAME:-ai-chatbot}
       MYSQL_USER: ${SERVICE_DB_USERNAME:-ai_chatbot}
       MYSQL_PASSWORD: ${SERVICE_DB_PASSWORD:?Set SERVICE_DB_PASSWORD before starting the service}
       MYSQL_ROOT_PASSWORD: ${SERVICE_DB_ROOT_PASSWORD:?Set SERVICE_DB_ROOT_PASSWORD before starting the service}
@@ -32,7 +32,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
-      DB_URL: jdbc:mysql://mysql:3306/${SERVICE_DB_NAME:-ai_chatbot}?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
+      DB_URL: jdbc:mysql://mysql:3306/${SERVICE_DB_NAME:-ai-chatbot}?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
       DB_USERNAME: ${SERVICE_DB_USERNAME:-ai_chatbot}
       DB_PASSWORD: ${SERVICE_DB_PASSWORD:?Set SERVICE_DB_PASSWORD before starting the service}
       DEFAULT_ADMIN_USERNAME: ${SERVICE_ADMIN_USERNAME:-admin}
