@@ -311,7 +311,7 @@ public class KnowledgeChatService {
         List<ChatTraceStep> traces = new ArrayList<>();
         if (!aiEnabled) {
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
-                    "AI 服务尚未配置。知识库管理可正常使用；配置 AI_DASHSCOPE_API_KEY 并设置 AI_ENABLED=true 后即可问答。");
+                    "AI 服务尚未启用。知识库管理可正常使用；请在当前运行环境启用 AI 并配置模型密钥后再问答。");
         }
 
         String normalizedScenarioCode = safeScenario(scenarioCode);

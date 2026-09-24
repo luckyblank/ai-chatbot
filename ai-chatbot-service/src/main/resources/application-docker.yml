@@ -1,0 +1,19 @@
+spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+
+app:
+  ai:
+    enabled: ${AI_ENABLED:false}
+  storage:
+    root: ${APP_STORAGE_ROOT:/app/runtime-data}
+  knowledge:
+    seed-root: ${APP_KNOWLEDGE_SEED_ROOT:/app/knowledge-seed}
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS}
+  auth:
+    default-username: ${DEFAULT_ADMIN_USERNAME:admin}
+    default-password: ${DEFAULT_ADMIN_PASSWORD}
+    default-display-name: ${DEFAULT_ADMIN_DISPLAY_NAME:系统管理员}

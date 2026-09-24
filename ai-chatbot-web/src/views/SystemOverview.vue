@@ -3,8 +3,8 @@
     <header><h1>系统管理</h1><p>集中查看模型、数据和文件服务配置；敏感信息不会在页面中显示。</p></header>
     <p class="configuration-note">这里展示当前生效的服务配置，不等同于实时健康检查。实际请求异常会在对应业务页面明确提示。</p>
     <div class="service-grid">
-      <article><CpuChipIcon /><div><label>模型服务</label><strong>qwen-plus</strong><p>DashScope OpenAI 兼容接口</p></div><span class="configured">已配置</span></article>
-      <article><CircleStackIcon /><div><label>向量服务</label><strong>text-embedding-v4</strong><p>1024 维 · 本地持久化索引</p></div><span class="configured">已配置</span></article>
+      <article><CpuChipIcon /><div><label>模型服务</label><strong>{{ aiStatusDisplay.title }}</strong><p>{{ aiStatusDisplay.detail }}</p></div><span :class="aiStatusDisplay.kind === 'configured' ? 'configured' : 'local-mode'">{{ aiStatusDisplay.badge }}</span></article>
+      <article><CircleStackIcon /><div><label>向量服务</label><strong>text-embedding-v4</strong><p>1024 维 · 本地持久化索引</p></div><span :class="aiStatusDisplay.kind === 'configured' ? 'configured' : 'local-mode'">{{ aiStatusDisplay.badge }}</span></article>
       <article><CircleStackIcon /><div><label>业务数据</label><strong>MySQL</strong><p>沿用当前项目数据源配置</p></div><span class="configured">已配置</span></article>
       <article><FolderOpenIcon /><div><label>文件存储</label><strong>本地文件存储</strong><p>知识文件与会话附件</p></div><span class="local-mode">本地模式</span></article>
     </div>
@@ -12,7 +12,12 @@
   </section>
 </template>
 <script setup>
+import { computed, onMounted } from 'vue'
 import { CircleStackIcon, CpuChipIcon, FolderOpenIcon } from '@heroicons/vue/24/outline'
+import { aiStatusState, describeAiStatus, refreshAiStatus } from '../services/aiStatus'
+
+const aiStatusDisplay = computed(() => describeAiStatus(aiStatusState.status, aiStatusState.loading))
+onMounted(refreshAiStatus)
 </script>
 <style scoped lang="scss">
 .system-page { max-width: 1260px; margin: 0 auto; padding: 34px; }h1 { margin: 0 0 7px; font-size: 36px; letter-spacing: -.035em; }header p { margin: 0; color: var(--text-muted); font-size: 14px; }.configuration-note{margin:20px 0 0;padding:11px 13px;color:var(--text-muted);background:var(--surface-subtle);border:1px solid var(--border-color);border-radius:8px;font-size:12px;line-height:1.6}

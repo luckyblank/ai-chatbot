@@ -152,6 +152,10 @@ export const authAPI = {
   logout: () => request('/api/v1/auth/logout', { method: 'POST' })
 }
 
+export const systemAPI = {
+  aiStatus: () => request('/api/v1/system/ai-status')
+}
+
 export const knowledgeAPI = {
   list: () => request('/api/v1/knowledge-bases'),
   create: (payload) => request('/api/v1/knowledge-bases', {

@@ -1,0 +1,23 @@
+spring:
+  config:
+    # Loaded only when the dev profile is active and the backend working directory
+    # is ai-chatbot-service. Keep this local file out of Git.
+    import: optional:file:./.env.development[.properties]
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/ai_chatbot?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=false&serverTimezone=Asia/Shanghai}
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:123456}
+
+app:
+  ai:
+    enabled: ${AI_ENABLED:false}
+  storage:
+    root: ${APP_STORAGE_ROOT:./runtime-data}
+  knowledge:
+    seed-root: ${APP_KNOWLEDGE_SEED_ROOT:../knowledge-seed}
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
+  auth:
+    default-username: ${DEFAULT_ADMIN_USERNAME:admin}
+    default-password: ${DEFAULT_ADMIN_PASSWORD:Admin@123456}
+    default-display-name: ${DEFAULT_ADMIN_DISPLAY_NAME:系统管理员}

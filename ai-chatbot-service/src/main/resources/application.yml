@@ -1,6 +1,8 @@
 spring:
   application:
     name: ai-chatbot
+  profiles:
+    default: dev
   ai:
     ollama:
       base-url: http://localhost:11434 # ollama服务地址， 这就是默认值
@@ -10,7 +12,7 @@ spring:
           temperature: 0.8 # 模型温度，影响模型生成结果的随机性，越小越稳定
     openai: #openai配置
       base-url: https://dashscope.aliyuncs.com/compatible-mode #api地址
-      api-key: ${AI_DASHSCOPE_API_KEY}
+      api-key: ${AI_DASHSCOPE_API_KEY:disabled-when-ai-is-off}
       chat:
         options:
           model: qwen3.8-max  #模型名称
@@ -18,10 +20,6 @@ spring:
         options:
           model: text-embedding-v4
           dimensions: 1024
-  datasource:
-    url: ${DB_URL:jdbc:mysql://localhost:3306/ai_chatbot?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8}
-    password: ${DB_PASSWORD:123456}
-    username: ${DB_USERNAME:root}
   servlet:
     multipart:
       max-file-size: 100MB
@@ -37,24 +35,14 @@ server:
 
 app:
   ai:
-    enabled: ${AI_ENABLED:true}
     call-timeout-seconds: ${AI_CALL_TIMEOUT_SECONDS:45}
   legacy:
     enabled: ${LEGACY_API_ENABLED:false}
-  storage:
-    root: ${APP_STORAGE_ROOT:./runtime-data}
-  knowledge:
-    seed-root: ${APP_KNOWLEDGE_SEED_ROOT:../knowledge-seed}
   upload:
     max-size: ${APP_UPLOAD_MAX_SIZE:104857600}
-  cors:
-    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
   auth:
     session-hours: ${AUTH_SESSION_HOURS:24}
     cookie-secure: ${AUTH_COOKIE_SECURE:false}
-    default-username: ${DEFAULT_ADMIN_USERNAME:admin}
-    default-password: ${DEFAULT_ADMIN_PASSWORD:Admin@123456}
-    default-display-name: ${DEFAULT_ADMIN_DISPLAY_NAME:系统管理员}
   workflow:
     external-timeout: ${WORKFLOW_EXTERNAL_TIMEOUT:PT30S}
   authorization:

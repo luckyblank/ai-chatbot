@@ -38,8 +38,9 @@ services:
       DEFAULT_ADMIN_USERNAME: ${SERVICE_ADMIN_USERNAME:-admin}
       DEFAULT_ADMIN_PASSWORD: ${SERVICE_ADMIN_PASSWORD:?Set SERVICE_ADMIN_PASSWORD before starting the service}
       DEFAULT_ADMIN_DISPLAY_NAME: ${SERVICE_ADMIN_DISPLAY_NAME:-系统管理员}
-      AI_ENABLED: ${AI_ENABLED:-false}
-      AI_DASHSCOPE_API_KEY: ${AI_DASHSCOPE_API_KEY:-disabled-when-ai-is-off}
+      SPRING_PROFILES_ACTIVE: docker
+      AI_ENABLED: ${SERVICE_AI_ENABLED:-false}
+      AI_DASHSCOPE_API_KEY: ${SERVICE_AI_DASHSCOPE_API_KEY:-disabled-when-ai-is-off}
       APP_STORAGE_ROOT: /app/runtime-data
       APP_KNOWLEDGE_SEED_ROOT: /app/knowledge-seed
       CORS_ALLOWED_ORIGINS: http://localhost:${SERVICE_WEB_PORT:-15175},http://127.0.0.1:${SERVICE_WEB_PORT:-15175}

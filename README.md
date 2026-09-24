@@ -4,10 +4,18 @@
 
 ## 快速体验
 
-1. 启动后端与前端。
-2. 打开 `http://localhost:5173`。
-3. 使用默认账号登录：`admin` / `Admin@123456`。
-4. 直接进入会话中心即可普通聊天；需要企业知识时再选择知识库。
+开发环境和 Docker 部署环境分开配置：后端默认使用 `dev` profile，Docker Compose 显式传入 `SPRING_PROFILES_ACTIVE=docker`。两套环境各自读取自己的配置；默认都关闭模型能力，离线订单工作流仍可演示。
+
+### 本地开发
+
+```powershell
+cd ai-chatbot-service
+if (-not (Test-Path .env.development)) { Copy-Item .env.development.example .env.development }
+# 编辑 .env.development 的数据库连接和密码；需要模型时再设置 AI_ENABLED=true 和 AI_DASHSCOPE_API_KEY。
+mvn spring-boot:run
+```
+
+另开终端在 `ai-chatbot-web` 运行 `npm install`、`npm run dev`，访问 `http://localhost:5173`。开发环境的 `.env.development` 只在从后端目录启动时自动导入；它不会进入 Git，也不会被 Compose 读取。
 
 > 默认账号用于本地首次体验。正式使用前请通过环境变量修改账号和密码。
 
@@ -16,18 +24,20 @@
 Docker Desktop 已启动时，可使用项目名 `ai-chatbot` 启动 MySQL、后端和 Web：
 
 ```powershell
-if (-not (Test-Path .env)) { Copy-Item .env.example .env }
-# 编辑 .env，至少替换数据库、Root 和管理员密码；真实 .env 不会进入 Git。
-docker compose -f compose.yaml config
-docker compose -f compose.yaml up -d --build
-docker compose -f compose.yaml ps
+if (-not (Test-Path .env.docker)) { Copy-Item .env.docker.example .env.docker }
+# 编辑 .env.docker，至少替换数据库、Root 和管理员密码；真实文件不会进入 Git。
+docker compose --env-file .env.docker -f compose.yaml config --quiet
+docker compose --env-file .env.docker -f compose.yaml up -d --build
+docker compose --env-file .env.docker -f compose.yaml ps
 ```
 
-访问 `http://localhost:15175`。Web、后端和 MySQL 的固定默认宿主端口分别为 `15175`、`18082`、`13318`；只有主动修改 `.env` 中的 `SERVICE_WEB_PORT`、`SERVICE_BACKEND_PORT`、`SERVICE_MYSQL_PORT` 才会变化。默认只绑定 `127.0.0.1`，不会发布到局域网；三个容器默认命名为 `ai-chatbot-mysql`、`ai-chatbot-backend`、`ai-chatbot-web`。不要使用 `down`、`prune`、`rm` 或 `rmi` 清理用户已有资源。
+以上 `up` 命令用于全新部署。本机当前 MySQL 容器还使用忽略的 `.env.recovery.compose.yaml`；在这台机器再次执行 `up` 时须同时加 `-f .env.recovery.compose.yaml`，避免无意重建 MySQL。该恢复文件不用于新环境。
 
-如果已有旧版 `.env`，请将其中的 `DEMO_*` 键逐一改为对应的 `SERVICE_*` 键，并保留原数据库名、密码和端口值。新环境的默认库名是 `ai_chatbot`；这不会自动重命名或复制旧数据库。复用旧数据卷时设置 `SERVICE_EXISTING_VOLUMES=true` 和两个旧卷名，且必须使用旧库实际的数据库名和有效凭据；不要让两个 MySQL 容器同时挂载同一个数据卷。迁移细节见[技术部署与维护](docs/技术部署与维护.md)。
+访问 `http://localhost:15175`。Web、后端和 MySQL 的固定默认宿主端口分别为 `15175`、`18082`、`13318`；只有主动修改 `.env.docker` 中的 `SERVICE_WEB_PORT`、`SERVICE_BACKEND_PORT`、`SERVICE_MYSQL_PORT` 才会变化。默认只绑定 `127.0.0.1`，不会发布到局域网；三个容器默认命名为 `ai-chatbot-mysql`、`ai-chatbot-backend`、`ai-chatbot-web`。不要使用 `down`、`prune`、`rm` 或 `rmi` 清理用户已有资源。
 
-`AI_ENABLED=false` 时仍可运行不依赖模型的“售后订单审批演示”工作流；要演示真实客服对话和模型准备草案，在本机环境中显式设置 `AI_ENABLED=true` 与 `AI_DASHSCOPE_API_KEY`。完整验收记录见 [客服 Agent 可靠业务闭环 A 实施记录](docs/客服Agent可靠业务闭环-A实施记录.md)。
+如果已有旧版 `.env`，先迁移为 `.env.docker`，将其中的 `DEMO_*` 键逐一改为对应的 `SERVICE_*` 键，并保留原数据库名、密码和端口值。Docker 的 AI 开关与密钥现在使用 `SERVICE_AI_ENABLED`、`SERVICE_AI_DASHSCOPE_API_KEY`，不再从开发环境的 `AI_ENABLED`、`AI_DASHSCOPE_API_KEY` 自动继承。新环境的默认库名是 `ai_chatbot`；这不会自动重命名或复制旧数据库。复用旧数据卷时设置 `SERVICE_EXISTING_VOLUMES=true` 和两个旧卷名，且必须使用旧库实际的数据库名和有效凭据；不要让两个 MySQL 容器同时挂载同一个数据卷。迁移细节见[技术部署与维护](docs/技术部署与维护.md)。
+
+`SERVICE_AI_ENABLED=false` 时仍可运行不依赖模型的“售后订单审批演示”工作流；要演示真实客服对话和模型准备草案，在 Docker `.env.docker` 中显式设置 `SERVICE_AI_ENABLED=true` 与 `SERVICE_AI_DASHSCOPE_API_KEY`。页面左下角显示后端的 AI 配置状态；“参数已配置”只代表开关和密钥已填写，不代表外部模型已连通。完整验收记录见 [客服 Agent 可靠业务闭环 A 实施记录](docs/客服Agent可靠业务闭环-A实施记录.md)。
 
 ## 文档入口
 

@@ -73,7 +73,7 @@ public class KnowledgeIngestionService {
         VectorStore vectorStore = vectorStoreProvider.getIfAvailable();
         if (!aiEnabled || vectorStore == null) {
             document.setStatus(DocumentStatus.PENDING_AI);
-            document.setErrorMessage("AI 服务尚未配置；设置 AI_DASHSCOPE_API_KEY 并启用 AI_ENABLED 后可重新索引");
+            document.setErrorMessage("AI 服务尚未启用；请在当前运行环境启用 AI 并配置模型密钥后重新索引");
             return repository.saveDocument(document);
         }
 
