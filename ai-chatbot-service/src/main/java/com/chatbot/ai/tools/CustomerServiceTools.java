@@ -55,8 +55,8 @@ public class CustomerServiceTools {
         }
     }
 
-    @Tool(description = "按客户编号查询该客户最近最多 20 笔订单，返回订单号、商品、状态和履约信息。仅使用用户提供的客户编号；客服操作员 userId 不是客户编号。")
-    public List<CustomerServiceDataRepository.OrderView> queryCustomerOrders(
+    @Tool(description = "按客户编号查询该客户最近最多 20 笔订单，返回订单号、商品、状态、履约信息及 hasMore。hasMore 为 true 时不得说已查到全部订单，应请用户提供订单号或商品和时间线索。仅使用用户提供的客户编号；客服操作员 userId 不是客户编号。")
+    public CustomerServiceDataRepository.CustomerOrdersView queryCustomerOrders(
             @ToolParam(description = "客户编号，例如 CUST-10002") String customerNo,
             ToolContext toolContext) {
         long started = System.nanoTime();
@@ -69,7 +69,9 @@ public class CustomerServiceTools {
                         org.springframework.http.HttpStatus.NOT_FOUND, "客户不存在");
             }
             var result = repository.findOrdersByCustomer(normalizedCustomerNo);
-            traceRecorder.record(toolContext, "查询客户订单", "客户编号=" + safe(normalizedCustomerNo) + "；返回 " + result.size() + " 笔订单", "completed", elapsed(started));
+            traceRecorder.record(toolContext, "查询客户订单", "客户编号=" + safe(normalizedCustomerNo)
+                    + "；返回最近 " + result.orders().size() + " 笔订单"
+                    + (result.hasMore() ? "，仍有更早订单" : ""), "completed", elapsed(started));
             return result;
         } catch (RuntimeException exception) {
             traceRecorder.record(toolContext, "查询客户订单", "查询失败，详细原因已写入服务日志", "failed", elapsed(started));

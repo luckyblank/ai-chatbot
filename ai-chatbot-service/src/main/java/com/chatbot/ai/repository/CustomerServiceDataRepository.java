@@ -45,9 +45,14 @@ public class CustomerServiceDataRepository {
                     logistics_status VARCHAR(80),
                     paid_at TIMESTAMP NULL,
                     delivered_at TIMESTAMP NULL,
-                    INDEX idx_service_order_customer (customer_no)
+                    INDEX idx_service_order_customer (customer_no),
+                    INDEX idx_service_order_customer_recent (customer_no, paid_at DESC, order_no DESC)
                 )
                 """);
+        if (!indexExists("ai_service_order", "idx_service_order_customer_recent")) {
+            jdbcTemplate.execute("CREATE INDEX idx_service_order_customer_recent "
+                    + "ON ai_service_order(customer_no, paid_at DESC, order_no DESC)");
+        }
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS ai_business_subject (
                     id VARCHAR(64) PRIMARY KEY,
@@ -96,14 +101,16 @@ public class CustomerServiceDataRepository {
                 .stream().findFirst();
     }
 
-    public List<OrderView> findOrdersByCustomer(String customerNo) {
-        return jdbcTemplate.query("""
+    public CustomerOrdersView findOrdersByCustomer(String customerNo) {
+        List<OrderView> matches = jdbcTemplate.query("""
                 SELECT * FROM ai_service_order WHERE customer_no=?
-                ORDER BY paid_at DESC, order_no DESC LIMIT 20
+                ORDER BY paid_at DESC, order_no DESC LIMIT 21
                 """, (rs, row) -> new OrderView(rs.getString("order_no"), rs.getString("customer_no"),
                 rs.getString("channel"), rs.getString("product_name"), rs.getBigDecimal("amount"),
                 rs.getString("order_status"), rs.getString("logistics_status"),
                 toInstant(rs.getTimestamp("paid_at")), toInstant(rs.getTimestamp("delivered_at"))), customerNo);
+        return new CustomerOrdersView(customerNo,
+                List.copyOf(matches.subList(0, Math.min(20, matches.size()))), matches.size() > 20);
     }
 
     public Optional<BusinessSubjectView> findBusinessSubject(String subjectNo) {
@@ -248,6 +255,7 @@ public class CustomerServiceDataRepository {
     public record OrderView(String orderNo, String customerNo, String channel, String productName,
                             BigDecimal amount, String orderStatus, String logisticsStatus,
                             Instant paidAt, Instant deliveredAt) { }
+    public record CustomerOrdersView(String customerNo, List<OrderView> orders, boolean hasMore) { }
     public record BusinessSubjectView(String subjectNo, String subjectType, String displayName,
                                       String serviceTier, String subjectStatus, String serviceContext) { }
     public record TicketView(String ticketNo, String customerNo, String orderNo, String category,

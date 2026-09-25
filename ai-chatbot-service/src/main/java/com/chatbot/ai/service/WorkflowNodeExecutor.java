@@ -198,7 +198,10 @@ public class WorkflowNodeExecutor {
         };
         Map<String, Object> output = new LinkedHashMap<>();
         output.put("operation", operation);
-        output.put("found", result != null && (!(result instanceof List<?> list) || !list.isEmpty()));
+        output.put("found", result != null
+                && (!(result instanceof List<?> list) || !list.isEmpty())
+                && (!(result instanceof CustomerServiceDataRepository.CustomerOrdersView orders)
+                    || !orders.orders().isEmpty()));
         output.put("result", result == null ? null : objectMapper.convertValue(result, Object.class));
         return output;
     }

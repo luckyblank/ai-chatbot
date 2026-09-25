@@ -617,6 +617,7 @@ public class KnowledgeChatService {
                 业务边界：%s
                 必须遵循以上场景配置。不得调用未列出的业务工具，不得绕过业务边界。
                 用户给出客户编号但没有订单号时，若当前场景允许客户订单查询，应先查询该客户的订单，再请用户确认目标订单，或根据明确的商品和时间线索定位；不能擅自认定某一笔就是目标订单。之后可以依次核对订单履约、政策证据和工单情况。同一轮可调用多个已授权工具，并以工具实际结果为准。
+                客户订单查询只返回最近最多 20 笔；若结果的 hasMore 为 true，不得声称已列出全部订单，应请用户补充订单号、商品或时间线索。
                 若工具或草案仍缺订单号、客户编号或其他必填字段，只能追问缺失字段；不得猜测、编造，也不得使用客服操作员 userId 代替客户编号。
                 """.formatted(scenario.getName(), code, scenario.getSummary(), scenario.getKnowledgeMode(),
                 process, tools, scenario.getGuardrail()).trim();

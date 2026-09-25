@@ -89,9 +89,10 @@ class WorkflowNodeExecutorTest {
                         .tools(List.of("客户订单查询")).build()));
         when(businessData.findCustomer("CUST-10002")).thenReturn(Optional.of(
                 new CustomerServiceDataRepository.CustomerView("CUST-10002", "客户", "金牌", "***", "正常", "优先客服")));
-        when(businessData.findOrdersByCustomer("CUST-10002")).thenReturn(List.of(
-                new CustomerServiceDataRepository.OrderView("ORD-1", "CUST-10002", "web", "商品",
-                        BigDecimal.TEN, "已完成", "已签收", null, null)));
+        when(businessData.findOrdersByCustomer("CUST-10002")).thenReturn(
+                new CustomerServiceDataRepository.CustomerOrdersView("CUST-10002", List.of(
+                        new CustomerServiceDataRepository.OrderView("ORD-1", "CUST-10002", "web", "商品",
+                                BigDecimal.TEN, "已完成", "已签收", null, null)), false));
 
         Map<String, Object> result = executor.execute(node("tool"),
                 mapper.readTree("{\"operation\":\"queryCustomerOrders\"}"),

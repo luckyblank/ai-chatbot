@@ -41,12 +41,13 @@ class CustomerOrderLookupTest {
         ToolContext context = new ToolContext(TrustedToolContext.values(
                 ACTOR, "conversation-1", null, "request-1", "commerce-support", true));
 
-        List<CustomerServiceDataRepository.OrderView> orders = tools.queryCustomerOrders("CUST-10002", context);
-        assertThat(orders).extracting(CustomerServiceDataRepository.OrderView::orderNo)
+        CustomerServiceDataRepository.CustomerOrdersView lookup = tools.queryCustomerOrders("CUST-10002", context);
+        assertThat(lookup.hasMore()).isFalse();
+        assertThat(lookup.orders()).extracting(CustomerServiceDataRepository.OrderView::orderNo)
                 .containsExactly("ORD-20260918-001");
-        assertThat(tools.queryOrder(orders.get(0).orderNo(), context).customerNo())
+        assertThat(tools.queryOrder(lookup.orders().get(0).orderNo(), context).customerNo())
                 .isEqualTo("CUST-10002");
-        assertThat(tools.checkAfterSalesEligibility(orders.get(0).orderNo(), "退货", context)
+        assertThat(tools.checkAfterSalesEligibility(lookup.orders().get(0).orderNo(), "退货", context)
                 .requiresManualReview()).isTrue();
 
         assertThatThrownBy(() -> tools.queryCustomerOrders("CUST-10001", context))
@@ -54,5 +55,27 @@ class CustomerOrderLookupTest {
                         exception -> assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN));
         assertThatThrownBy(() -> tools.queryCustomerOrders(ACTOR.id(), context))
                 .isInstanceOf(ResponseStatusException.class);
+    }
+
+    @Test
+    void largeCustomerOrderHistoryIsBoundedAndMarkedIncomplete() {
+        var dataSource = new DriverManagerDataSource(
+                "jdbc:h2:mem:customer-order-limit;MODE=MySQL;DB_CLOSE_DELAY=-1", "sa", "");
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        CustomerServiceDataRepository repository = new CustomerServiceDataRepository(jdbc);
+        repository.initialize();
+        for (int index = 0; index < 21; index++) {
+            jdbc.update("""
+                    INSERT INTO ai_service_order(id,order_no,customer_no,channel,product_name,amount,
+                    order_status,logistics_status,paid_at) VALUES(?,?,?,?,?,?,?,?,?)
+                    """, "extra-" + index, "ORD-EXTRA-" + index, "CUST-10002", "web", "商品", 1,
+                    "已完成", "已签收", java.sql.Timestamp.from(
+                            java.time.Instant.parse("2026-09-25T00:00:00Z").plusSeconds(index)));
+        }
+
+        CustomerServiceDataRepository.CustomerOrdersView result = repository.findOrdersByCustomer("CUST-10002");
+        assertThat(result.orders()).hasSize(20);
+        assertThat(result.hasMore()).isTrue();
+        assertThat(result.orders().get(0).orderNo()).isEqualTo("ORD-EXTRA-20");
     }
 }
