@@ -28,12 +28,17 @@
           </div>
         </div>
 
-        <label class="upload-zone" :class="{ uploading }" role="button" :tabindex="uploading ? -1 : 0" :aria-disabled="uploading" :aria-busy="uploading" aria-label="选择文件上传到当前知识库" @keydown.enter.prevent="openUploadPicker" @keydown.space.prevent="openUploadPicker">
-          <input ref="uploadInput" type="file" accept=".pdf,.txt,.md,.markdown" :disabled="uploading" @change="uploadFile">
+        <label class="upload-zone" :class="{ uploading, 'drag-over': draggingFiles }" role="button" :tabindex="uploading ? -1 : 0" :aria-disabled="uploading" :aria-busy="uploading" aria-label="选择或拖入多个文件上传到当前知识库" @keydown.enter.prevent="openUploadPicker" @keydown.space.prevent="openUploadPicker" @dragenter.prevent="onUploadDragEnter" @dragover.prevent="onUploadDragOver" @dragleave.prevent="onUploadDragLeave" @drop.prevent="onUploadDrop">
+          <input ref="uploadInput" type="file" multiple accept=".pdf,.txt,.md,.markdown" :disabled="uploading" @change="onUploadInputChange">
           <ArrowUpTrayIcon />
-          <strong>{{ uploading ? '正在上传…' : '点击选择文件' }}</strong>
-          <span>支持 PDF、TXT、Markdown，单文件最大 20 MB</span>
+          <strong>{{ uploading ? `正在上传 ${uploadCompleted}/${uploadTotal}` : draggingFiles ? '松开以上传文件' : '点击选择或拖入文件' }}</strong>
+          <span v-if="uploading && uploadingName">{{ uploadingName }}</span>
+          <span v-else>支持一次上传多个 PDF、TXT、Markdown 文件，单文件最大 20 MB</span>
         </label>
+        <div v-if="uploadResults.length" class="upload-results" role="status" aria-live="polite">
+          <strong>本次上传：{{ uploadResults.filter(item => item.success).length }} 个成功，{{ uploadResults.filter(item => !item.success).length }} 个失败</strong>
+          <ul><li v-for="(item, index) in uploadResults" :key="`${index}-${item.fileName}`"><span>{{ item.fileName }}</span><span :class="item.success ? 'success' : 'error'">{{ item.success ? '已上传，等待处理' : item.error }}</span></li></ul>
+        </div>
 
         <div class="documents-header"><h3>文档</h3><span>{{ documents.length }} 个文件</span></div>
         <div v-if="documents.length === 0" class="documents-empty">当前知识库还没有文档。</div>
@@ -93,6 +98,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowPathIcon, ArrowUpTrayIcon, CircleStackIcon, DocumentTextIcon, EyeIcon, PencilSquareIcon, PlusIcon, TrashIcon, XMarkIcon } from '@heroicons/vue/24/outline'
 import { knowledgeAPI } from '../services/api'
+import { uploadKnowledgeFiles } from '../services/knowledgeUpload'
 
 const knowledgeBases = ref([]), selectedId = ref(''), documents = ref([])
 const loading = ref(true), uploading = ref(false), creating = ref(false), showCreate = ref(false)
@@ -101,6 +107,8 @@ const notice = ref(''), noticeType = ref('info'), form = ref({ name: '', descrip
 const route = useRoute()
 const router = useRouter()
 const uploadInput = ref(null)
+const draggingFiles = ref(false), uploadCompleted = ref(0), uploadTotal = ref(0), uploadingName = ref(''), uploadResults = ref([])
+let uploadDragDepth = 0
 const previewDocument = ref(null), previewTab = ref('original'), previewText = ref(''), chunks = ref([]), chunksLoading = ref(false)
 const previewKnowledgeBaseId = ref('')
 const catalogLoaded = ref(false)
@@ -166,6 +174,7 @@ async function applyKnowledgeRoute() {
   if (nextId !== selectedId.value) {
     selectedId.value = nextId
     documents.value = []
+    uploadResults.value = []
     resetPreview()
   }
   if (!requestedDocumentId || previewDocument.value?.id !== requestedDocumentId || previewKnowledgeBaseId.value !== nextId) resetPreview()
@@ -229,11 +238,52 @@ async function updateKnowledgeBase() {
 function openUploadPicker() {
   if (!uploading.value) uploadInput.value?.click()
 }
-async function uploadFile(event) {
-  const file = event.target.files?.[0]; event.target.value = ''; if (!file) return
+function onUploadInputChange(event) {
+  const files = Array.from(event.target.files || [])
+  event.target.value = ''
+  void uploadFiles(files)
+}
+function onUploadDragEnter(event) {
+  if (uploading.value || !Array.from(event.dataTransfer?.types || []).includes('Files')) return
+  uploadDragDepth += 1
+  draggingFiles.value = true
+}
+function onUploadDragOver(event) {
+  if (uploading.value || !Array.from(event.dataTransfer?.types || []).includes('Files')) return
+  event.dataTransfer.dropEffect = 'copy'
+  draggingFiles.value = true
+}
+function onUploadDragLeave() {
+  uploadDragDepth = Math.max(0, uploadDragDepth - 1)
+  if (uploadDragDepth === 0) draggingFiles.value = false
+}
+function onUploadDrop(event) {
+  uploadDragDepth = 0
+  draggingFiles.value = false
+  if (!uploading.value) void uploadFiles(event.dataTransfer?.files)
+}
+async function uploadFiles(files) {
+  const queue = Array.from(files || [])
+  if (!queue.length || uploading.value || !selectedId.value) return
+  const knowledgeBaseId = selectedId.value
   uploading.value = true
-  try { await knowledgeAPI.upload(selectedId.value, file); showNotice('文件已上传，正在处理', 'success'); await refreshDocuments() }
-  catch (error) { showNotice(error.message, 'error') } finally { uploading.value = false }
+  uploadResults.value = []
+  uploadCompleted.value = 0
+  uploadTotal.value = queue.length
+  try {
+    const summary = await uploadKnowledgeFiles(queue, file => knowledgeAPI.upload(knowledgeBaseId, file), progress => {
+      if (progress.phase === 'start') uploadingName.value = progress.fileName
+      else {
+        uploadCompleted.value = progress.completed
+        uploadResults.value = [...uploadResults.value, progress.result]
+      }
+    })
+    if (selectedId.value === knowledgeBaseId) await refreshDocuments()
+    showNotice(`${summary.succeeded} 个文件上传成功${summary.failed ? `，${summary.failed} 个失败` : '，正在处理'}`, summary.failed ? 'error' : 'success')
+  } finally {
+    uploading.value = false
+    uploadingName.value = ''
+  }
 }
 async function reindex(document) {
   try { await knowledgeAPI.reindex(selectedId.value, document.id); showNotice('已提交重新索引', 'success'); await refreshDocuments() }
@@ -321,7 +371,8 @@ button svg { width: 17px; } .notice { padding: 11px 14px; margin-bottom: 18px; b
 .detail { padding: 24px; } .detail-header { display: flex; justify-content: space-between; gap: 16px; align-items: start; } .detail-header h2 { margin: 0 0 6px; } .detail-header p { margin: 0; color: var(--text-muted); }.detail-actions{display:flex;align-items:center;gap:6px;flex:none}.secondary-action{display:inline-flex;align-items:center;gap:6px;padding:7px 9px;color:var(--text-muted);background:transparent;border:0;border-radius:7px}.secondary-action:hover{color:var(--primary);background:var(--primary-soft)}
 button.danger-text { display: inline-flex; align-items: center; gap: 6px; color: var(--danger); background: transparent; border: 0; }
 .upload-zone { min-height: 150px; margin: 24px 0; display: grid; place-content: center; justify-items: center; gap: 7px; border: 1px dashed var(--border-color); border-radius: 12px; background: var(--surface-subtle); cursor: pointer; }
-.upload-zone input { display: none; } .upload-zone:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; border-color: var(--primary); } .upload-zone svg { width: 32px; color: var(--primary); } .upload-zone span { color: var(--text-muted); font-size: 13px; } .upload-zone.uploading { opacity: .6; pointer-events: none; }
+.upload-zone input { display: none; } .upload-zone:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; border-color: var(--primary); } .upload-zone svg { width: 32px; color: var(--primary); } .upload-zone span { color: var(--text-muted); font-size: 13px; } .upload-zone.drag-over { border-color: var(--primary); background: var(--primary-soft); box-shadow: inset 0 0 0 2px var(--primary); } .upload-zone.uploading { opacity: .6; pointer-events: none; }
+.upload-results { margin: -8px 0 24px; padding: 12px 14px; border: 1px solid var(--border-color); border-radius: 10px; background: var(--surface-subtle); font-size: 13px; } .upload-results>strong { display: block; margin-bottom: 8px; } .upload-results ul { max-height: 180px; overflow-y: auto; margin: 0; padding: 0; list-style: none; } .upload-results li { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; } .upload-results li+li { border-top: 1px solid var(--border-color); } .upload-results li span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .upload-results .success { color: var(--success); flex: none; } .upload-results .error { color: var(--danger); text-align: right; }
 .documents-header { display: flex; justify-content: space-between; align-items: center; margin: 28px 0 12px; } .documents-header h3 { margin: 0; } .documents-header span { color: var(--text-muted); font-size: 13px; }
 .documents-empty { color: var(--text-muted); padding: 24px 0; }
 .document-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto auto auto; align-items: center; gap: 12px; padding: 14px 0; border-top: 1px solid var(--border-color); }
