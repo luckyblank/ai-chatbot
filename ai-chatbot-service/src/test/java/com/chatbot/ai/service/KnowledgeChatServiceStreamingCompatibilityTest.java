@@ -3,28 +3,89 @@ package com.chatbot.ai.service;
 import com.chatbot.ai.domain.chat.ChatCitation;
 import com.chatbot.ai.domain.chat.ChatTraceStep;
 import org.junit.jupiter.api.Test;
+import org.springframework.ai.model.function.FunctionCallback;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class KnowledgeChatServiceStreamingCompatibilityTest {
 
     @Test
-    void routesExplicitBusinessIdentifiersThroughBufferedToolCallPath() {
-        assertThat(KnowledgeChatService.requiresBufferedToolCall(
-                "请查询订单 ORD-20260918-001 的履约状态")).isTrue();
-        assertThat(KnowledgeChatService.requiresBufferedToolCall(
-                "客户 cust-10001 有哪些服务权益？")).isTrue();
-        assertThat(KnowledgeChatService.requiresBufferedToolCall(
-                "检查 TENANT-2001、EMP-3108 和 MER-8802")).isTrue();
+    void citationExcerptKeepsTheFullRetrievedChunk() {
+        String chunk = "文档标题\n" + "售后处理依据。".repeat(40);
+        assertThat(chunk.length()).isGreaterThan(180);
+        assertThat(KnowledgeChatService.excerpt(chunk)).isEqualTo(chunk);
+    }
 
+    @Test
+    void routesEveryToolEnabledTurnThroughCompleteToolCallPath() {
         assertThat(KnowledgeChatService.requiresBufferedToolCall(
-                "请介绍订单查询流程，不要查询真实数据")).isFalse();
-        assertThat(KnowledgeChatService.requiresBufferedToolCall(
-                "ORDINARY 文本不应被识别为订单编号")).isFalse();
+                List.of(org.mockito.Mockito.mock(FunctionCallback.class)))).isTrue();
+        assertThat(KnowledgeChatService.requiresBufferedToolCall(List.of())).isFalse();
         assertThat(KnowledgeChatService.requiresBufferedToolCall(null)).isFalse();
+        assertThat(KnowledgeChatService.timeoutSeconds(
+                List.of(org.mockito.Mockito.mock(FunctionCallback.class)), 45, 120)).isEqualTo(120);
+        assertThat(KnowledgeChatService.timeoutSeconds(List.of(), 45, 120)).isEqualTo(45);
+    }
+
+    @Test
+    void timeoutCancelsTheRunningModelTask() throws Exception {
+        CountDownLatch interrupted = new CountDownLatch(1);
+
+        assertThatThrownBy(() -> KnowledgeChatService.awaitModelCall(() -> {
+            try {
+                Thread.sleep(10_000);
+            } catch (InterruptedException exception) {
+                interrupted.countDown();
+                throw exception;
+            }
+            return "late answer";
+        }, 1)).isInstanceOfSatisfying(ResponseStatusException.class, exception ->
+                assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.GATEWAY_TIMEOUT));
+        assertThat(interrupted.await(2, TimeUnit.SECONDS)).isTrue();
+    }
+
+    @Test
+    void interruptingTheWaitingRequestCancelsTheRunningModelTask() throws Exception {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch interrupted = new CountDownLatch(1);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread request = new Thread(() -> {
+            try {
+                KnowledgeChatService.awaitModelCall(() -> {
+                    started.countDown();
+                    try {
+                        Thread.sleep(10_000);
+                    } catch (InterruptedException exception) {
+                        interrupted.countDown();
+                        throw exception;
+                    }
+                    return "late answer";
+                }, 30);
+            } catch (Throwable exception) {
+                failure.set(exception);
+            }
+        });
+        request.start();
+        try {
+            assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+            request.interrupt();
+            request.join(2_000);
+            assertThat(request.isAlive()).isFalse();
+            assertThat(failure.get()).isInstanceOfSatisfying(ResponseStatusException.class,
+                    exception -> assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE));
+            assertThat(interrupted.await(2, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            request.interrupt();
+        }
     }
 
     @Test

@@ -13,6 +13,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.document.Document;
 import org.springframework.beans.factory.ObjectProvider;
 
 import java.time.Duration;
@@ -26,7 +28,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 
 class WorkflowNodeExecutorTest {
     private static final AuthenticatedUser ACTOR = new AuthenticatedUser("admin-1", "admin", "管理员", "ADMIN");
@@ -79,6 +83,27 @@ class WorkflowNodeExecutorTest {
     }
 
     @Test
+    void listsCustomerOrdersOnlyWhenScenarioAndActorAuthorizeCustomer() throws Exception {
+        when(scenarios.findByCode("commerce-support")).thenReturn(Optional.of(
+                ScenarioDefinition.builder().code("commerce-support")
+                        .tools(List.of("客户订单查询")).build()));
+        when(businessData.findCustomer("CUST-10002")).thenReturn(Optional.of(
+                new CustomerServiceDataRepository.CustomerView("CUST-10002", "客户", "金牌", "***", "正常", "优先客服")));
+        when(businessData.findOrdersByCustomer("CUST-10002")).thenReturn(List.of(
+                new CustomerServiceDataRepository.OrderView("ORD-1", "CUST-10002", "web", "商品",
+                        BigDecimal.TEN, "已完成", "已签收", null, null)));
+
+        Map<String, Object> result = executor.execute(node("tool"),
+                mapper.readTree("{\"operation\":\"queryCustomerOrders\"}"),
+                Map.of("customerNo", "CUST-10002"), null, "commerce-support", ACTOR);
+
+        assertThat(result).containsEntry("operation", "queryCustomerOrders")
+                .containsEntry("found", true);
+        assertThat(result.get("result").toString()).contains("ORD-1");
+        verify(authorization).requireBusinessSubjectAccess(ACTOR, "CUST-10002");
+    }
+
+    @Test
     void conditionCanBranchOnActualToolResultField() throws Exception {
         when(scenarios.findByCode("commerce-support")).thenReturn(Optional.of(
                 ScenarioDefinition.builder().code("commerce-support")
@@ -104,6 +129,43 @@ class WorkflowNodeExecutorTest {
                 mapper.readTree("{\"knowledgeBaseId\":\"kb-1\"}"),
                 Map.of("question", "怎么操作"), null, "it-service", ACTOR))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("已完成索引");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void knowledgeReturnsActualEvidenceAndAnHonestEmptyResult() throws Exception {
+        ObjectProvider<VectorStore> provider = mock(ObjectProvider.class);
+        VectorStore store = mock(VectorStore.class);
+        when(provider.getIfAvailable()).thenReturn(store);
+        when(catalog.findKnowledgeBase("kb-evidence")).thenReturn(Optional.of(KnowledgeBase.builder().id("kb-evidence").build()));
+        when(catalog.findDocuments("kb-evidence")).thenReturn(List.of(KnowledgeDocument.builder().id("policy").status(DocumentStatus.READY).build()));
+        when(store.similaritySearch(any(org.springframework.ai.vectorstore.SearchRequest.class)))
+            .thenReturn(List.of(new Document("已签收订单可在七日内申请售后。", Map.of("file_name", "售后规则.txt", "document_id", "policy"))))
+            .thenReturn(List.of());
+        var realExecutor = new WorkflowNodeExecutor(catalog, businessData, scenarios, authorization, provider, null, mapper);
+        var hit = realExecutor.execute(node("knowledge"), mapper.readTree("{}"), Map.of("question", "售后条件"), "kb-evidence", "knowledge-research", ACTOR);
+        assertThat(hit).containsEntry("matchCount", 1);
+        assertThat(hit.get("matches").toString()).contains("七日", "售后规则.txt", "policy");
+        var miss = realExecutor.execute(node("knowledge"), mapper.readTree("{}"), Map.of("question", "没有关联的问题"), "kb-evidence", "knowledge-research", ACTOR);
+        assertThat(miss).containsEntry("matchCount", 0).containsEntry("matches", List.of());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void modelExecutesConfiguredPromptAndReportsMissingServiceOrEmptyResponse() throws Exception {
+        ObjectProvider<ChatClient> provider = mock(ObjectProvider.class);
+        ChatClient client = mock(ChatClient.class, RETURNS_DEEP_STUBS);
+        when(provider.getIfAvailable()).thenReturn(client);
+        when(client.prompt().user(anyString()).advisors(any(java.util.function.Consumer.class)).call().content())
+            .thenReturn("模型返回的测试摘要").thenReturn(" ");
+        var realExecutor = new WorkflowNodeExecutor(catalog, businessData, scenarios, authorization, null, provider, mapper);
+        var result = realExecutor.execute(node("model"), mapper.readTree("{\"prompt\":\"总结问题\"}"), Map.of("question", "网络故障"), null, "it-service", ACTOR);
+        assertThat(result).containsEntry("answer", "模型返回的测试摘要");
+        assertThatThrownBy(() -> realExecutor.execute(node("model"), mapper.readTree("{\"prompt\":\"总结问题\"}"), Map.of("question", "网络故障"), null, "it-service", ACTOR))
+            .hasMessageContaining("没有返回内容");
+        when(provider.getIfAvailable()).thenReturn(null);
+        assertThatThrownBy(() -> realExecutor.execute(node("model"), mapper.readTree("{\"prompt\":\"总结问题\"}"), Map.of("question", "网络故障"), null, "it-service", ACTOR))
+            .hasMessageContaining("模型服务未启用");
     }
 
     @Test

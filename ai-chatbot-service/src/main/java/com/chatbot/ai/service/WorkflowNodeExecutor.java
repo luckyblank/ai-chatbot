@@ -135,16 +135,17 @@ public class WorkflowNodeExecutor {
                                      AuthenticatedUser actor) {
         String operation = config.path("operation").asText("").trim();
         if (operation.isEmpty()) {
-            throw new IllegalArgumentException("业务工具节点未配置 operation。支持只读查询：queryOrder、queryCustomerEntitlements、queryBusinessSubject、queryServiceTickets。");
+            throw new IllegalArgumentException("业务工具节点未配置 operation。支持只读查询：queryOrder、queryCustomerOrders、queryCustomerEntitlements、queryBusinessSubject、queryServiceTickets。");
         }
         String defaultField = switch (operation) {
             case "queryOrder" -> "orderNo";
-            case "queryCustomerEntitlements", "queryServiceTickets" -> "customerNo";
+            case "queryCustomerOrders", "queryCustomerEntitlements", "queryServiceTickets" -> "customerNo";
             case "queryBusinessSubject" -> "subjectNo";
             default -> throw new IllegalArgumentException("试运行不允许调用该业务工具：" + operation + "。仅支持只读查询，写入操作必须走正式审批流程。");
         };
         Set<String> requiredLabels = switch (operation) {
             case "queryOrder" -> Set.of("订单履约查询", "服务订单查询");
+            case "queryCustomerOrders" -> Set.of("客户订单查询");
             case "queryCustomerEntitlements" -> Set.of("客户权益查询");
             case "queryBusinessSubject" -> Set.of("业务主体查询", "商家主体查询");
             case "queryServiceTickets" -> Set.of("工单进度查询", "服务工单查询");
@@ -167,6 +168,13 @@ public class WorkflowNodeExecutor {
         if (authorization == null) throw new IllegalStateException("业务授权服务未启用");
         Object result = switch (operation) {
             case "queryOrder" -> authorization.requireOrderAccess(actor, identifier);
+            case "queryCustomerOrders" -> {
+                authorization.requireBusinessSubjectAccess(actor, identifier);
+                if (businessData.findCustomer(identifier).isEmpty()) {
+                    throw new IllegalArgumentException("客户不存在");
+                }
+                yield businessData.findOrdersByCustomer(identifier);
+            }
             case "queryCustomerEntitlements" -> {
                 authorization.requireBusinessSubjectAccess(actor, identifier);
                 yield businessData.findCustomer(identifier).orElse(null);

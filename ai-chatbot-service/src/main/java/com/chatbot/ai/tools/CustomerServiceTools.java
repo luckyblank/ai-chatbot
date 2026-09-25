@@ -40,7 +40,7 @@ public class CustomerServiceTools {
         }
     }
 
-    @Tool(description = "按订单号查询真实订单的渠道、商品/服务、金额、订单状态与履约状态。只有用户提供了订单号时才可调用。")
+    @Tool(description = "按订单号查询真实订单的渠道、商品/服务、金额、订单状态与履约状态。订单号须由用户提供，或来自本轮已授权的客户订单查询结果，不得猜测。")
     public CustomerServiceDataRepository.OrderView queryOrder(
             @ToolParam(description = "订单号，例如 ORD-20260918-001") String orderNo,
             ToolContext toolContext) {
@@ -52,6 +52,28 @@ public class CustomerServiceTools {
             return result;
         } catch (RuntimeException exception) {
             traceRecorder.record(toolContext, "查询订单履约", "查询失败，详细原因已写入服务日志", "failed", elapsed(started)); throw exception;
+        }
+    }
+
+    @Tool(description = "按客户编号查询该客户最近最多 20 笔订单，返回订单号、商品、状态和履约信息。仅使用用户提供的客户编号；客服操作员 userId 不是客户编号。")
+    public List<CustomerServiceDataRepository.OrderView> queryCustomerOrders(
+            @ToolParam(description = "客户编号，例如 CUST-10002") String customerNo,
+            ToolContext toolContext) {
+        long started = System.nanoTime();
+        try {
+            TrustedToolContext trusted = TrustedToolContext.require(toolContext);
+            authorization.requireBusinessSubjectAccess(trusted.actor(), customerNo);
+            String normalizedCustomerNo = customerNo.trim();
+            if (repository.findCustomer(normalizedCustomerNo).isEmpty()) {
+                throw new org.springframework.web.server.ResponseStatusException(
+                        org.springframework.http.HttpStatus.NOT_FOUND, "客户不存在");
+            }
+            var result = repository.findOrdersByCustomer(normalizedCustomerNo);
+            traceRecorder.record(toolContext, "查询客户订单", "客户编号=" + safe(normalizedCustomerNo) + "；返回 " + result.size() + " 笔订单", "completed", elapsed(started));
+            return result;
+        } catch (RuntimeException exception) {
+            traceRecorder.record(toolContext, "查询客户订单", "查询失败，详细原因已写入服务日志", "failed", elapsed(started));
+            throw exception;
         }
     }
 

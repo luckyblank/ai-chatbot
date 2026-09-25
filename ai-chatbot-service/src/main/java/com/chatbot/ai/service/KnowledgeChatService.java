@@ -7,6 +7,8 @@ import com.chatbot.ai.domain.knowledge.DocumentStatus;
 import com.chatbot.ai.domain.scenario.ScenarioDefinition;
 import com.chatbot.ai.repository.KnowledgeCatalogRepository;
 import com.chatbot.ai.repository.ScenarioRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.model.Media;
@@ -22,6 +24,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.Disposable;
+import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -33,19 +37,18 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.regex.Pattern;
+import java.util.concurrent.Callable;
 
 import static com.chatbot.ai.service.ToolTraceRecorder.TRACE_ID_CONTEXT_KEY;
 import static org.springframework.ai.chat.client.advisor.AbstractChatMemoryAdvisor.CHAT_MEMORY_CONVERSATION_ID_KEY;
 
 @Service
 public class KnowledgeChatService {
-    private static final Pattern BUSINESS_IDENTIFIER = Pattern.compile(
-            "(?i)(?<![A-Z0-9])(?:ORD|CUST|TENANT|EMP|MER)-[A-Z0-9]+(?:-[A-Z0-9]+)*(?![A-Z0-9])");
+    private static final Logger log = LoggerFactory.getLogger(KnowledgeChatService.class);
     private static final Duration BUFFERED_DELTA_DELAY = Duration.ofMillis(24);
     private static final int MIN_STREAM_CHUNK_LENGTH = 12;
     private static final int SOFT_STREAM_CHUNK_LENGTH = 24;
@@ -62,6 +65,8 @@ public class KnowledgeChatService {
     private final String modelName;
     @Value("${app.ai.call-timeout-seconds:45}")
     private long modelTimeoutSeconds = 45;
+    @Value("${app.ai.tool-call-timeout-seconds:120}")
+    private long toolCallTimeoutSeconds = 120;
 
     public KnowledgeChatService(KnowledgeCatalogRepository catalogRepository,
                                 ScenarioRepository scenarioRepository,
@@ -124,12 +129,11 @@ public class KnowledgeChatService {
     }
 
     /**
-     * Streams native model deltas for ordinary chat. Spring AI 1.0.0-M6 can pass
-     * partial tool-call JSON to {@code MethodToolCallback} when DashScope streams
-     * a tool request. Questions that contain an explicit business identifier use
-     * the synchronous tool-call path, then expose the completed answer as paced
-     * SSE deltas. The terminal event carries the same citations and trace metadata
-     * as {@link #answer(String, String, String, String)}.
+     * Streams native model deltas when no business tools are exposed. Spring AI
+     * 1.0.0-M6 can pass partial tool-call JSON to MethodToolCallback while
+     * streaming, including when the business identifier appeared in a previous
+     * turn. Every tool-enabled turn therefore uses the complete tool-call path
+     * and then emits paced SSE deltas with citations and traces.
      */
     public Flux<AnswerStreamEvent> streamAnswer(String conversationId,
                                                 String knowledgeBaseId,
@@ -170,7 +174,7 @@ public class KnowledgeChatService {
             AtomicBoolean traceClosed = new AtomicBoolean(false);
             long modelStartedAt = System.nanoTime();
 
-            if (!prepared.toolCallbacks().isEmpty() && requiresBufferedToolCall(question)) {
+            if (requiresBufferedToolCall(prepared.toolCallbacks())) {
                 try {
                     String answer = callModel(prepared, conversationId, traceId);
                     AnswerResult result = completeSuccessfulAnswer(
@@ -222,13 +226,38 @@ public class KnowledgeChatService {
     }
 
     private String callModel(PreparedAnswer prepared, String conversationId, String traceId) {
-        CompletableFuture<String> call = CompletableFuture.supplyAsync(() ->
-                requestSpec(prepared, conversationId, traceId).call().content());
+        long timeoutSeconds = timeoutSeconds(prepared.toolCallbacks(),
+                modelTimeoutSeconds, toolCallTimeoutSeconds);
         try {
-            return call.get(Math.max(1, modelTimeoutSeconds), TimeUnit.SECONDS);
+            return awaitModelCall(() -> requestSpec(prepared, conversationId, traceId).call().content(),
+                    timeoutSeconds);
+        } catch (ResponseStatusException exception) {
+            if (exception.getStatusCode() == HttpStatus.GATEWAY_TIMEOUT) {
+                List<ChatTraceStep> completedTools = toolTraceRecorder.finish(traceId);
+                log.warn("Model call timed out after {}s; scenario={}, requestId={}, completedTools={}",
+                        timeoutSeconds,
+                        prepared.toolContext().getOrDefault(TrustedToolContext.SCENARIO_CODE, "unknown"),
+                        prepared.toolContext().getOrDefault(TrustedToolContext.REQUEST_ID, "unknown"),
+                        completedTools.stream().map(step -> step.getTitle() + ":" + step.getStatus()).toList());
+            }
+            throw exception;
+        }
+    }
+
+    static long timeoutSeconds(List<FunctionCallback> callbacks, long ordinarySeconds,
+                               long toolSeconds) {
+        return Math.max(1, requiresBufferedToolCall(callbacks) ? toolSeconds : ordinarySeconds);
+    }
+
+    static String awaitModelCall(Callable<String> modelCall, long timeoutSeconds) {
+        FutureTask<String> call = new FutureTask<>(modelCall);
+        Disposable scheduled = Schedulers.boundedElastic().schedule(call);
+        try {
+            return call.get(Math.max(1, timeoutSeconds), TimeUnit.SECONDS);
         } catch (TimeoutException exception) {
             call.cancel(true);
-            throw new ResponseStatusException(HttpStatus.GATEWAY_TIMEOUT, "模型调用超时，已停止本轮处理");
+            throw new ResponseStatusException(HttpStatus.GATEWAY_TIMEOUT,
+                    "模型调用超过 " + Math.max(1, timeoutSeconds) + " 秒，本轮回答已中断；可重新生成");
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             call.cancel(true);
@@ -237,6 +266,8 @@ public class KnowledgeChatService {
             Throwable cause = exception.getCause();
             if (cause instanceof RuntimeException runtimeException) throw runtimeException;
             throw new IllegalStateException("模型调用失败", cause);
+        } finally {
+            scheduled.dispose();
         }
     }
 
@@ -260,8 +291,8 @@ public class KnowledgeChatService {
         return request;
     }
 
-    static boolean requiresBufferedToolCall(String question) {
-        return question != null && BUSINESS_IDENTIFIER.matcher(question).find();
+    static boolean requiresBufferedToolCall(List<FunctionCallback> callbacks) {
+        return callbacks != null && !callbacks.isEmpty();
     }
 
     static Flux<AnswerStreamEvent> bufferedAnswerEvents(AnswerResult result, Duration delay) {
@@ -440,7 +471,7 @@ public class KnowledgeChatService {
 
                 %s
 
-                请只依据以上资料回答。如果资料不足，请明确说明不知道。回答应简洁、准确，并在相关内容后用 [资料 N] 标注来源。
+                政策性结论只依据以上资料；订单、客户和工单事实只依据已授权工具的实际结果。资料或业务数据不足时请明确说明，不得编造。回答应简洁、准确，并在政策内容后用 [资料 N] 标注来源。
                 """.formatted(scenarioInstruction, question, context);
 
         return new PreparedAnswer(chatClient, userPrompt, safeMedia, true, citations.size(),
@@ -458,7 +489,7 @@ public class KnowledgeChatService {
                     prepared.toolCallbacks().isEmpty()
                             ? "当前场景未开放业务工具"
                             : prepared.knowledgeGrounded()
-                            ? "本轮没有触发客户权益、订单履约、售后资格或服务工单工具"
+                            ? "本轮没有触发客户权益、客户订单、订单履约、售后资格或服务工单工具"
                             : "本轮未触发业务数据查询或写入",
                     "skipped", 0));
         } else {
@@ -556,9 +587,8 @@ public class KnowledgeChatService {
         return null;
     }
 
-    private String excerpt(String text) {
-        String normalized = text == null ? "" : text.replaceAll("\\s+", " ").trim();
-        return normalized.length() > 180 ? normalized.substring(0, 180) + "…" : normalized;
+    static String excerpt(String text) {
+        return text == null ? "" : text.trim();
     }
 
     private String safeScenario(String scenarioCode) {
@@ -582,11 +612,12 @@ public class KnowledgeChatService {
                 当前业务场景：%s（%s）
                 场景说明：%s
                 知识策略：知识库%s
-                标准处理流程：%s
+                建议处理步骤（按用户诉求与证据选择，不代表已执行）：%s
                 允许的业务工具：%s
                 业务边界：%s
                 必须遵循以上场景配置。不得调用未列出的业务工具，不得绕过业务边界。
-                若工具或草案需要订单号、客户编号或其他必填字段，而用户尚未提供，只能追问缺失字段；不得猜测、编造，也不得使用客服操作员 userId 代替客户编号。
+                用户给出客户编号但没有订单号时，若当前场景允许客户订单查询，应先查询该客户的订单，再请用户确认目标订单，或根据明确的商品和时间线索定位；不能擅自认定某一笔就是目标订单。之后可以依次核对订单履约、政策证据和工单情况。同一轮可调用多个已授权工具，并以工具实际结果为准。
+                若工具或草案仍缺订单号、客户编号或其他必填字段，只能追问缺失字段；不得猜测、编造，也不得使用客服操作员 userId 代替客户编号。
                 """.formatted(scenario.getName(), code, scenario.getSummary(), scenario.getKnowledgeMode(),
                 process, tools, scenario.getGuardrail()).trim();
     }

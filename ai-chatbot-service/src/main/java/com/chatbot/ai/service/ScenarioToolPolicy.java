@@ -21,6 +21,7 @@ import java.util.stream.Collectors;
 public class ScenarioToolPolicy {
     private static final Map<String, Set<String>> TOOL_NAMES_BY_LABEL = Map.ofEntries(
             Map.entry("客户权益查询", Set.of("queryCustomerEntitlements")),
+            Map.entry("客户订单查询", Set.of("queryCustomerOrders")),
             Map.entry("订单履约查询", Set.of("queryOrder")),
             Map.entry("服务订单查询", Set.of("queryOrder")),
             Map.entry("售后资格校验", Set.of("checkAfterSalesEligibility")),

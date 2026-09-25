@@ -336,6 +336,10 @@ public class WorkflowService {
                 status = "failed";
                 error = exception.getMessage();
                 detail = error;
+            } catch (ResponseStatusException exception) {
+                status = "failed";
+                error = exception.getReason() == null ? "业务查询失败" : exception.getReason();
+                detail = error;
             } catch (RuntimeException exception) {
                 log.error("Workflow node failed: workflow={}, run={}, node={}",
                         workflow.getId(), run.getId(), node.getId(), exception);

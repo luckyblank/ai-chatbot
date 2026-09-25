@@ -24,7 +24,7 @@
             <section><label>知识策略</label><strong>知识库{{ selected.knowledgeMode }}</strong><p>{{ knowledgeDescription }}</p></section>
             <section><label>业务工具</label><strong>{{ selected.tools.length }} 个已授权工具</strong><p>{{ selected.tools.length ? selected.tools.join('、') : '本场景不开放业务工具。' }}</p></section>
           </div>
-          <section class="workflow"><label>标准处理流程</label><ol><li v-for="(step, index) in selected.process" :key="`${index}-${step}`"><span>{{ String(index + 1).padStart(2, '0') }}</span><strong>{{ step }}</strong></li></ol></section>
+          <section class="workflow"><label>建议处理步骤</label><ol><li v-for="(step, index) in selected.process" :key="`${index}-${step}`"><span>{{ String(index + 1).padStart(2, '0') }}</span><strong>{{ step }}</strong></li></ol></section>
           <section class="guardrail"><ShieldCheckIcon /><div><label>业务边界</label><p>{{ selected.guardrail }}</p></div></section>
         </template>
 
@@ -40,7 +40,7 @@
             <label class="wide"><span>场景说明</span><textarea v-model.trim="draft.summary" rows="3" maxlength="500" required></textarea><small>{{ draft.summary.length }}/500</small></label>
             <label><span>知识策略</span><select v-model="draft.knowledgeMode" required><option value="可选">可选</option><option value="推荐">推荐</option><option value="必选">必选</option></select></label>
             <label class="wide"><span>允许的业务工具</span><textarea v-model="draft.toolsText" rows="5" maxlength="1000" placeholder="每行一个工具；不开放工具时留空"></textarea><small>每行一个工具，模型会按此范围约束工具使用。</small></label>
-            <label class="wide"><span>标准处理流程</span><textarea v-model="draft.processText" rows="6" maxlength="1500" required placeholder="每行一个步骤，按执行顺序排列"></textarea><small>每行一个步骤，至少保留 1 步。</small></label>
+            <label class="wide"><span>建议处理步骤</span><textarea v-model="draft.processText" rows="6" maxlength="1500" required placeholder="每行一个步骤，按建议顺序排列"></textarea><small>步骤用于提示模型，实际调用以工具权限和用户请求为准；每行一个步骤，至少保留 1 步。</small></label>
             <label class="wide"><span>业务边界</span><textarea v-model.trim="draft.guardrail" rows="4" maxlength="1000" required></textarea><small>{{ draft.guardrail.length }}/1000</small></label>
           </div>
         </form>
@@ -135,7 +135,7 @@ function lines(value) {
 async function saveScenario() {
   const process = lines(draft.processText)
   if (!process.length) {
-    showMessage('标准处理流程至少需要保留一个步骤。', 'error')
+    showMessage('建议处理步骤至少需要保留一个步骤。', 'error')
     return
   }
   saving.value = true

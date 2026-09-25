@@ -27,9 +27,9 @@ class ScenarioToolPolicyTest {
         ScenarioToolPolicy policy = policyWithAllCallbacks();
 
         assertThat(names(policy.allowedCallbacks(scenario(
-                "客户权益查询", "订单履约查询", "售后资格校验", "创建服务工单"))))
+                "客户权益查询", "客户订单查询", "订单履约查询", "售后资格校验", "创建服务工单"))))
                 .containsExactlyInAnyOrder(
-                        "queryCustomerEntitlements", "queryOrder",
+                        "queryCustomerEntitlements", "queryCustomerOrders", "queryOrder",
                         "checkAfterSalesEligibility", "prepareServiceTicket")
                 .doesNotContain("queryBusinessSubject", "queryServiceTickets");
     }
@@ -42,7 +42,7 @@ class ScenarioToolPolicyTest {
                 "业务主体查询", "工单进度查询", "创建 IT 工单"))))
                 .containsExactlyInAnyOrder(
                         "queryBusinessSubject", "queryServiceTickets", "prepareServiceTicket")
-                .doesNotContain("queryCustomerEntitlements", "queryOrder", "checkAfterSalesEligibility");
+                .doesNotContain("queryCustomerEntitlements", "queryCustomerOrders", "queryOrder", "checkAfterSalesEligibility");
     }
 
     @Test
@@ -51,6 +51,8 @@ class ScenarioToolPolicyTest {
 
         assertThat(names(policy.allowedCallbacks(scenario("订单履约查询"))))
                 .containsExactly("queryOrder");
+        assertThat(names(policy.allowedCallbacks(scenario("客户订单查询"))))
+                .containsExactly("queryCustomerOrders");
         assertThat(policy.allowedCallbacks(scenario("未注册的自定义工具"))).isEmpty();
     }
 
@@ -61,6 +63,7 @@ class ScenarioToolPolicyTest {
         when(provider.getIfAvailable()).thenReturn(callbacks);
         FunctionCallback[] availableCallbacks = new FunctionCallback[] {
                 callback("queryCustomerEntitlements"),
+                callback("queryCustomerOrders"),
                 callback("queryOrder"),
                 callback("queryBusinessSubject"),
                 callback("checkAfterSalesEligibility"),

@@ -38,6 +38,7 @@ public class ScenarioRepository {
                 """);
         Integer count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM ai_scenario", Integer.class);
         if (count != null && count == 0) seedDefaults();
+        else upgradeDefaultCommerceTools();
     }
 
     public List<ScenarioDefinition> findAll() {
@@ -89,8 +90,8 @@ public class ScenarioRepository {
                 "不虚构企业内部数据，不执行业务写操作。"));
         save(defaultScenario(1, "commerce-support", "电商售后服务", "电商售后",
                 "覆盖订单、物流、退换货、退款资格与售后工单。", "推荐",
-                List.of("客户权益查询", "订单履约查询", "售后资格校验", "创建服务工单"),
-                List.of("核验订单", "判断问题类型", "匹配售后政策", "确认处理方案", "创建售后单"),
+                List.of("客户权益查询", "客户订单查询", "订单履约查询", "售后资格校验", "创建服务工单"),
+                List.of("核验客户与订单", "判断问题类型", "匹配售后政策", "确认处理方案", "准备售后单并等待确认"),
                 "退款、退货等写操作必须由用户明确确认。"));
         save(defaultScenario(2, "saas-success", "SaaS 客户成功", "客户成功",
                 "处理租户开通、账号权限、订阅账单、用量与故障升级。", "推荐",
@@ -111,6 +112,24 @@ public class ScenarioRepository {
                 "面向员工和客户检索制度、产品手册、流程与公告。", "推荐", List.of(),
                 List.of("选择知识域", "检索相关片段", "核对发布日期", "生成带引用回答"),
                 "资料不足时明确说明，不使用过期内容覆盖新政策。"));
+    }
+
+    private void upgradeDefaultCommerceTools() {
+        findByCode("commerce-support").ifPresent(scenario -> {
+            boolean changed = false;
+            if (scenario.getTools().equals(List.of("客户权益查询", "订单履约查询", "售后资格校验", "创建服务工单"))) {
+                scenario.setTools(List.of("客户权益查询", "客户订单查询", "订单履约查询", "售后资格校验", "创建服务工单"));
+                changed = true;
+            }
+            if (scenario.getProcess().equals(List.of("核验订单", "判断问题类型", "匹配售后政策", "确认处理方案", "创建售后单"))) {
+                scenario.setProcess(List.of("核验客户与订单", "判断问题类型", "匹配售后政策", "确认处理方案", "准备售后单并等待确认"));
+                changed = true;
+            }
+            if (changed) {
+                scenario.setUpdatedAt(Instant.now());
+                save(scenario);
+            }
+        });
     }
 
     private ScenarioDefinition defaultScenario(int sortOrder, String code, String name, String shortName,

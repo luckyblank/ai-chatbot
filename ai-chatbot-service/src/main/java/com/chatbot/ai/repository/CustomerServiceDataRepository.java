@@ -96,6 +96,16 @@ public class CustomerServiceDataRepository {
                 .stream().findFirst();
     }
 
+    public List<OrderView> findOrdersByCustomer(String customerNo) {
+        return jdbcTemplate.query("""
+                SELECT * FROM ai_service_order WHERE customer_no=?
+                ORDER BY paid_at DESC, order_no DESC LIMIT 20
+                """, (rs, row) -> new OrderView(rs.getString("order_no"), rs.getString("customer_no"),
+                rs.getString("channel"), rs.getString("product_name"), rs.getBigDecimal("amount"),
+                rs.getString("order_status"), rs.getString("logistics_status"),
+                toInstant(rs.getTimestamp("paid_at")), toInstant(rs.getTimestamp("delivered_at"))), customerNo);
+    }
+
     public Optional<BusinessSubjectView> findBusinessSubject(String subjectNo) {
         return jdbcTemplate.query("SELECT * FROM ai_business_subject WHERE subject_no=?",
                 (rs, row) -> new BusinessSubjectView(rs.getString("subject_no"), rs.getString("subject_type"),
