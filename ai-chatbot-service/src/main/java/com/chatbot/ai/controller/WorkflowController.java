@@ -6,6 +6,7 @@ import com.chatbot.ai.domain.vo.SaveWorkflowRequest;
 import com.chatbot.ai.domain.workflow.WorkflowDefinition;
 import com.chatbot.ai.domain.workflow.WorkflowRun;
 import com.chatbot.ai.service.WorkflowService;
+import com.chatbot.ai.service.WorkflowTemplateCatalog;
 import jakarta.validation.Valid;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.servlet.http.HttpServletRequest;
@@ -28,6 +29,12 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class WorkflowController {
     private final WorkflowService service;
+
+    @GetMapping("/templates")
+    public List<WorkflowTemplateCatalog.Template> templates(HttpServletRequest request) {
+        requireAdmin(request);
+        return WorkflowTemplateCatalog.templates();
+    }
 
     @GetMapping public List<WorkflowDefinition> list(HttpServletRequest request) {
         requireAdmin(request);

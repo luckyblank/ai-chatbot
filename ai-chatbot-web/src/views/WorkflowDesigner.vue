@@ -24,8 +24,8 @@
         <div class="save-state" :class="saveState" role="status" aria-live="polite">
           <span></span>{{ saveStateLabel }}
         </div>
-        <button class="secondary-action run-action" type="button" :title="runButtonHint" :disabled="Boolean(loadError) || isNew || editingLocked || saving || !form.enabled || saveState === 'dirty' || saveState === 'error'" @click="openRunSetup">
-          <PlayIcon />{{ running ? '运行中…' : '试运行' }}
+        <button class="secondary-action run-action" type="button" :title="runButtonHint" :disabled="Boolean(loadError) || loading || saving" @click="openRunSetup">
+          <PlayIcon />{{ editingLocked ? '查看运行' : '试运行' }}
         </button>
         <button class="primary-action" type="button" :disabled="Boolean(loadError) || saving || loading || editingLocked" @click="saveWorkflow">
           {{ saving ? '保存中…' : '保存工作流' }}
@@ -61,6 +61,7 @@
         'palette-collapsed': leftCollapsed,
         'inspector-collapsed': rightCollapsed,
         'list-mode': editorMode === 'list',
+        'testing-mode': testPanelOpen,
         compact: isCompact
       }"
     >
@@ -95,7 +96,7 @@
         </div>
       </aside>
 
-      <main class="designer-stage" :class="{ 'has-run-dock': runVisible }">
+      <main class="designer-stage">
         <header class="stage-toolbar">
           <div class="stage-toolbar-leading">
             <button
@@ -126,8 +127,8 @@
           </div>
 
           <div class="stage-run-tools">
-            <button v-if="lastRun && !runVisible" class="tool-button history-tool" type="button" aria-label="查看最近运行" @click="showLastRun"><ClockIcon /><span>最近运行</span></button>
-            <button v-if="isPhone" class="tool-button mobile-run-tool" type="button" :title="runButtonHint" :disabled="isNew || editingLocked || saving || !form.enabled || saveState === 'dirty' || saveState === 'error'" @click="openRunSetup"><PlayIcon />{{ running ? '运行中' : '试运行' }}</button>
+            <button v-if="lastRun && !testPanelOpen" class="tool-button history-tool" type="button" aria-label="查看最近运行" @click="showLastRun"><ClockIcon /><span>最近运行</span></button>
+            <button v-if="isPhone" class="tool-button mobile-run-tool" type="button" :title="runButtonHint" :disabled="saving" @click="openRunSetup"><PlayIcon />{{ running ? '运行中' : '试运行' }}</button>
           </div>
 
           <button
@@ -142,7 +143,7 @@
           </button>
         </header>
 
-        <div v-if="editorMode === 'canvas'" class="canvas-shell">
+        <div v-if="editorMode === 'canvas'" ref="canvasElement" class="canvas-shell">
           <div v-if="isPhone" class="mobile-preview-note">
             手机端为画布预览模式，请切换到列表编排修改节点顺序。
           </div>
@@ -171,7 +172,7 @@
             <template #node-workflow="{ data, selected }">
               <div
                 class="flow-node-card"
-                :class="[data.node.type, { selected, 'has-run': runVisible }, `run-${nodeRunStatus(data.node.id)}`]"
+                :class="[data.node.type, { selected, 'has-run': runVisible && runPhase !== 'setup' }, `run-${nodeRunStatus(data.node.id)}`]"
                 :aria-label="`第${data.index + 1}步，${nodeTypeLabel(data.node.type)}，${data.node.name || '未命名节点'}${runVisible ? `，${stepStatusLabel(nodeRunStatus(data.node.id))}` : ''}`"
                 @keydown="handleNodeKeydown($event, data.node.id)"
               >
@@ -189,16 +190,20 @@
                   <strong>{{ data.node.name || '未命名节点' }}</strong>
                   <em v-show="canvasScale >= .62">{{ data.node.description || '选择节点补充处理说明' }}</em>
                 </span>
-                <span v-if="runVisible" class="node-run-status" :class="nodeRunStatus(data.node.id)">
+                <span v-if="runVisible && runPhase !== 'setup'" class="node-run-status" :class="nodeRunStatus(data.node.id)">
                   <span class="run-status-mark"></span>{{ stepStatusLabel(nodeRunStatus(data.node.id)) }}<small v-if="runSteps[data.node.id]?.durationMs != null"> · {{ formatDuration(runSteps[data.node.id].durationMs) }}</small>
                 </span>
                 <Handle
-                  v-if="data.node.type !== 'output'"
+                  v-if="data.node.type !== 'output' && data.node.type !== 'condition'"
                   type="source"
                   :position="data.sourcePosition"
                   :connectable="!editingLocked"
                   class="flow-handle"
                 />
+                <template v-if="data.node.type === 'condition'">
+                  <Handle id="true" type="source" :position="Position.Bottom" :connectable="!editingLocked" class="flow-handle branch-true" title="满足条件" />
+                  <Handle id="false" type="source" :position="Position.Right" :connectable="!editingLocked" class="flow-handle branch-false" title="不满足条件" />
+                </template>
               </div>
             </template>
 
@@ -249,48 +254,9 @@
           </div>
         </section>
 
-        <section v-if="runVisible" class="run-dock" :class="{ expanded: runDockExpanded }" aria-label="工作流试运行">
-          <div class="run-dock-summary" role="status" aria-live="polite">
-            <span class="run-dock-indicator" :class="runPhase"></span>
-            <strong>{{ runPhaseLabel }}</strong>
-            <span v-if="runPhase !== 'setup'" class="run-dock-progress">{{ runProgressCount }} / {{ runTotal }} 节点</span>
-            <span class="run-dock-current">{{ runPhase === 'running' ? `正在执行：${activeNodeName}` : runSummary }}</span>
-            <span v-if="runRecord" class="run-dock-time">{{ `耗时 ${formatDuration(runElapsedMs)}` }}</span>
-            <button v-if="runRecord && ['waiting', 'interrupted'].includes(runPhase)" class="run-dock-toggle" type="button" :disabled="runStatusRefreshing || Boolean(approvalBusy)" @click="refreshCurrentRun"><ArrowPathIcon :class="{ 'refresh-spinning': runStatusRefreshing }" />{{ runStatusRefreshing ? '刷新中' : '刷新状态' }}</button>
-            <button class="run-dock-toggle" type="button" :aria-expanded="runDockExpanded" @click="runDockExpanded = !runDockExpanded">{{ runDockExpanded ? '收起详情' : '查看详情' }}<ChevronDownIcon :class="{ rotated: runDockExpanded }" /></button>
-            <button v-if="!editingLocked" class="run-dock-close" type="button" aria-label="关闭试运行面板" @click="closeRunDock"><XMarkIcon /></button>
-          </div>
-          <div v-if="runDockExpanded" class="run-dock-detail">
-            <form v-if="runPhase === 'setup'" class="run-input-form" @submit.prevent="runWorkflow">
-              <label><span>测试问题</span><textarea v-model="runQuestion" rows="2" maxlength="4000" placeholder="输入要交给工作流处理的真实问题"></textarea></label>
-              <label><span>其他输入参数（JSON，可选）</span><textarea v-model="runExtraInput" rows="3" spellcheck="false" placeholder='{"orderNo":"SO-001","category":"退款"}'></textarea></label>
-              <p>节点将实际执行；知识检索、业务工具和模型节点需要相应的服务与节点配置。敏感数据请勿用于测试。</p>
-              <p v-if="runConfigWarnings.length" class="run-config-warning">运行前请检查：{{ runConfigWarnings.join('；') }}</p>
-              <button class="run-submit" type="submit"><PlayIcon />开始运行</button>
-            </form>
-            <template v-else>
-            <p>下方为本次真实执行路径。点击节点可查看服务端返回的输入、输出与错误。<template v-if="runRecord?.definitionVersion"> 运行快照：{{ runRecord.definitionVersion }}</template></p>
-            <div v-if="runPhase === 'waiting'" class="run-approval-actions">
-              <span>流程停在「{{ activeNodeName }}」；{{ canApprove ? '管理员决定后继续同一次运行。' : '仅管理员可审批，请联系管理员处理。' }}</span>
-              <button v-if="canApprove" type="button" :disabled="Boolean(approvalBusy)" @click="resumeWorkflow(true)">{{ approvalBusy === 'approve' ? '处理中…' : '同意并继续' }}</button>
-              <button v-if="canApprove" type="button" class="reject" :disabled="Boolean(approvalBusy)" @click="resumeWorkflow(false)">{{ approvalBusy === 'reject' ? '处理中…' : '拒绝并结束' }}</button>
-            </div>
-            <div class="run-step-list">
-              <button v-for="(node, index) in runDisplayNodes" :key="node.id" type="button" :class="[nodeRunStatus(node.id), { active: selectedNodeId === node.id }]" @click="selectRunNode(node.id)">
-                <span class="run-step-index">{{ index + 1 }}</span>
-                <span class="run-status-mark"></span>
-                <strong>{{ node.name || '未命名节点' }}</strong>
-                <small>{{ stepStatusLabel(nodeRunStatus(node.id)) }}</small>
-                <time v-if="runSteps[node.id]?.durationMs != null">{{ formatDuration(runSteps[node.id].durationMs) }}</time>
-              </button>
-            </div>
-            <div v-if="runPhase === 'completed' && runRecord?.output !== undefined" class="run-final-output"><strong>最终输出</strong><pre>{{ formatPayload(runRecord.output) }}</pre></div>
-            </template>
-          </div>
-        </section>
       </main>
 
-      <aside id="workflow-node-inspector" class="node-inspector" :aria-hidden="rightCollapsed && isCompact">
+      <aside v-show="!testPanelOpen" id="workflow-node-inspector" class="node-inspector" :aria-hidden="rightCollapsed && isCompact">
         <header>
           <div><strong>属性面板</strong><span>{{ inspectorView === 'run' ? '本次运行' : inspectorView === 'node' ? '节点配置' : '流程设置' }}</span></div>
           <button class="icon-button" type="button" :aria-label="rightCollapsed ? '展开属性面板' : '收起属性面板'" @click="toggleRightPanel">
@@ -323,10 +289,9 @@
           </div>
           <label><span>节点类型</span><select v-model="selectedCanvasNode.type" :disabled="editingLocked"><option v-for="type in nodeTypes" :key="type.value" :value="type.value">{{ type.label }}</option></select></label>
           <label><span>节点名称</span><input v-model.trim="selectedCanvasNode.name" maxlength="60" required placeholder="节点名称" :disabled="editingLocked"></label>
-          <label><span>节点说明</span><textarea v-model.trim="selectedCanvasNode.description" rows="6" maxlength="160" placeholder="说明该节点处理什么" :disabled="editingLocked"></textarea></label>
-          <label><span>执行配置（JSON）</span><textarea v-model="selectedCanvasNode.config" rows="7" spellcheck="false" placeholder="{}" :disabled="editingLocked"></textarea></label>
-          <p class="config-hint">{{ nodeConfigHint(selectedCanvasNode.type) }}</p>
-          <button v-if="nodeConfigTemplate(selectedCanvasNode.type)" class="fill-config-template" type="button" :disabled="editingLocked" @click="fillNodeConfigTemplate(selectedCanvasNode)">填入示例配置</button>
+          <label><span>节点说明</span><textarea v-model.trim="selectedCanvasNode.description" rows="2" maxlength="160" placeholder="说明该节点处理什么" :disabled="editingLocked"></textarea></label>
+          <WorkflowNodeConfig :node="selectedCanvasNode" :nodes="form.nodes" :edges="effectiveEdges" :disabled="editingLocked"
+            :knowledge-bases="knowledgeBases" @update-config="selectedCanvasNode.config = $event" @branch="setNodeBranch" />
           <div class="inspector-order">
             <span>执行顺序</span>
             <div>
@@ -339,9 +304,10 @@
         </div>
 
         <div v-else class="inspector-content workflow-settings">
+          <button v-if="scenarioTemplate" class="template-action" type="button" :disabled="editingLocked" @click="applyScenarioTemplate">使用本场景可运行模板</button>
           <label><span>工作流名称</span><input v-model.trim="form.name" maxlength="80" required placeholder="工作流名称" :disabled="editingLocked"></label>
           <label><span>适用场景</span><select v-model="form.scenarioCode" :disabled="editingLocked"><option v-for="item in scenarios" :key="item.code" :value="item.code">{{ item.name }}</option></select></label>
-          <label><span>业务说明</span><textarea v-model.trim="form.description" rows="7" maxlength="500" placeholder="说明这条流程解决什么业务问题" :disabled="editingLocked"></textarea></label>
+          <label><span>业务说明</span><textarea v-model.trim="form.description" rows="3" maxlength="500" placeholder="说明这条流程解决什么业务问题" :disabled="editingLocked"></textarea></label>
           <label class="enable-setting">
             <span><strong>启用工作流</strong><small>启用后可在对应业务场景中运行</small></span>
             <input v-model="form.enabled" type="checkbox" aria-label="启用工作流" :disabled="editingLocked">
@@ -363,6 +329,12 @@
           </div>
         </div>
       </aside>
+      <WorkflowRunPanel v-show="testPanelOpen" :workflow="form" :edges="effectiveEdges" :template="scenarioTemplate"
+        :phase="runPhase" :record="runRecord" :steps="runPanelSteps" :error="runError" :saving="saving"
+        :dirty="isNew || ['dirty', 'error'].includes(saveState)" :running="running" :approval-busy="approvalBusy"
+        :refreshing="runStatusRefreshing" :knowledge-bases="knowledgeBases" :ai-status="aiStatus" :resource-error="resourceError"
+        @close="hideTestPanel" @run="runWorkflow" @retry="openRunSetup" @approve="resumeWorkflow" @refresh="refreshCurrentRun"
+        @select-node="highlightRunNode" @fix-node="fixRunIssue" @reload-resources="loadTestResources" />
     </div>
 
     <footer class="designer-status-bar">
@@ -399,7 +371,9 @@ import {
   PlayIcon, PlusIcon, QueueListIcon, Squares2X2Icon, TrashIcon, WrenchScrewdriverIcon, XMarkIcon
 } from '@heroicons/vue/24/outline'
 import { scenarios } from '../data/scenarios'
-import { workflowAPI } from '../services/api'
+import { workflowAPI, knowledgeAPI, systemAPI } from '../services/api'
+import WorkflowRunPanel from '../components/WorkflowRunPanel.vue'
+import WorkflowNodeConfig from '../components/WorkflowNodeConfig.vue'
 import { authState, ensureAuth } from '../services/auth'
 
 const route = useRoute()
@@ -417,7 +391,7 @@ const nodeTypes = [
 ]
 
 const flowApi = useVueFlow('workflow-designer-flow')
-const fitViewOptions = Object.freeze({ padding: .2, minZoom: .35, maxZoom: 1.15 })
+const fitViewOptions = Object.freeze({ padding: .2, minZoom: .35, maxZoom: 1 })
 const defaultEdgeOptions = Object.freeze({
   type: 'smoothstep',
   animated: false,
@@ -441,13 +415,17 @@ const activeNodeId = ref('')
 const activeEdgeKey = ref('')
 const traversedEdges = ref([])
 const recentEdgeKeys = ref([])
-const runDockExpanded = ref(false)
 const runElapsedMs = ref(0)
 const runError = ref('')
 const approvalBusy = ref('')
 const runStatusRefreshing = ref(false)
-const runQuestion = ref('')
-const runExtraInput = ref('{}')
+const testPanelOpen = ref(false)
+const templates = ref([])
+const knowledgeBases = ref([])
+const aiStatus = ref(null)
+const resourceError = ref('')
+const scenarioTemplate = computed(() => templates.value.find(item => item.scenarioCode === form.value.scenarioCode))
+const runPanelSteps = computed(() => runDisplayNodes.value.map(node => ({ nodeId: node.id, nodeName: node.name, nodeType: node.type, ...runSteps.value[node.id], status: nodeRunStatus(node.id) })))
 const followActiveNode = ref(true)
 let runController = null
 let noticeTimer = null
@@ -468,14 +446,16 @@ const inspectorView = ref('workflow')
 const selectedNodeId = ref('')
 const nodePositions = ref({})
 const canvasScale = ref(1)
+const canvasElement = ref(null)
+let paletteBeforeTest = null
 
 const saveStateLabel = computed(() => ({
   idle: '准备就绪', new: '尚未保存', dirty: '有未保存更改', saving: '正在保存', saved: lastSavedAt.value ? `已保存 ${lastSavedAt.value}` : '已保存', error: '保存失败'
 })[saveState.value] || '准备就绪')
 const runVisible = computed(() => runPhase.value !== 'idle')
-const editingLocked = computed(() => running.value || runPhase.value === 'waiting')
+const editingLocked = computed(() => running.value || runPhase.value === 'waiting' || (runPhase.value === 'interrupted' && runRecord.value?.status === 'running'))
 const canApprove = computed(() => authState.user?.role === 'ADMIN')
-const runButtonHint = computed(() => isNew.value ? '请先保存工作流' : runPhase.value === 'waiting' ? '请先处理待人工确认的运行' : !form.value.enabled ? '请先启用工作流' : saveState.value === 'dirty' || saveState.value === 'error' ? '请先保存当前修改，再试运行' : '输入测试数据并真实运行工作流')
+const runButtonHint = computed(() => editingLocked.value ? '查看当前运行' : '选择用例或填写数据，验证当前流程')
 const runDisplayNodes = computed(() => {
   const nodes = [...form.value.nodes]
   const ids = new Set(nodes.map(node => node.id))
@@ -487,37 +467,7 @@ const runDisplayNodes = computed(() => {
   })
   return nodes
 })
-const runTotal = computed(() => runRecord.value?.totalNodes || runDisplayNodes.value.length)
-const runProgressCount = computed(() => Object.values(runSteps.value).filter(step => ['completed', 'failed', 'skipped'].includes(step.status)).length)
 const activeNodeName = computed(() => form.value.nodes.find(node => node.id === activeNodeId.value)?.name || runSteps.value[activeNodeId.value]?.nodeName || '准备开始')
-const runPhaseLabel = computed(() => {
-  if (runPhase.value === 'failed' && !runRecord.value) return runProgressCount.value ? '运行中断' : '无法开始运行'
-  if (runPhase.value === 'interrupted') return runRecord.value?.status === 'running' ? '运行连接中断' : '运行已中断'
-  return ({ setup: '设置测试输入', running: '试运行中', completed: '运行完成', failed: '运行失败', waiting: '等待人工确认' })[runPhase.value] || '试运行'
-})
-const runSummary = computed(() => {
-  if (runPhase.value === 'setup') return '输入测试数据后开始真实执行'
-  if (runError.value) return runError.value
-  const failed = Object.values(runSteps.value).find(step => step.status === 'failed')
-  if (failed) return `失败节点：${failed.nodeName || form.value.nodes.find(node => node.id === failed.nodeId)?.name || '未知节点'}`
-  if (runPhase.value === 'waiting') return `等待节点：${activeNodeName.value}`
-  if (runPhase.value === 'interrupted') return runRecord.value?.statusMessage || '事件连接已中断，请刷新服务端运行状态。'
-  return runPhase.value === 'completed' ? '已得到最终执行结果' : '等待运行结果'
-})
-const runConfigWarnings = computed(() => form.value.nodes.flatMap(node => {
-  let config = {}
-  try { config = JSON.parse(node.config || '{}') || {} } catch { return [`${node.name}的执行配置不是有效 JSON`] }
-  if (node.type === 'condition') {
-    const warnings = []
-    if (!config.field || !config.operator) warnings.push(`${node.name}缺少条件 field / operator`)
-    const branches = effectiveEdges.value.filter(edge => edge.source === node.id).map(edge => edge.branch)
-    if (!branches.includes('true') || !branches.includes('false')) warnings.push(`${node.name}需要 true / false 两条分支连线`)
-    return warnings
-  }
-  if (node.type === 'knowledge' && !config.knowledgeBaseId) return [`${node.name}需要知识库 ID（也可在其他输入参数中提供 knowledgeBaseId）`]
-  if (node.type === 'tool' && !config.operation) return [`${node.name}缺少只读工具 operation`]
-  return []
-}))
 const hasExplicitEdges = computed(() => Array.isArray(form.value.edges))
 const effectiveEdges = computed(() => hasExplicitEdges.value ? form.value.edges : form.value.nodes.slice(0, -1).map((node, index) => ({
   id: `edge-${node.id}-${form.value.nodes[index + 1].id}`,
@@ -561,39 +511,43 @@ const flowEdges = computed(() => effectiveEdges.value.filter(edge => nodeById(ed
   id: edge.id,
   source: edge.source,
   target: edge.target,
+  sourceHandle: nodeById(edge.source)?.type === 'condition' ? edge.branch || 'true' : undefined,
   type: 'smoothstep',
-  label: edge.branch || undefined,
+  label: edge.branch === 'true' ? '满足' : edge.branch === 'false' ? '不满足' : undefined,
   animated: false,
-  class: runVisible.value ? `run-edge-${edgeRunStatus(edge)}` : '',
+  class: runVisible.value && runPhase.value !== 'setup' ? `run-edge-${edgeRunStatus(edge)}` : '',
   selectable: false,
   focusable: false,
-  markerEnd: runVisible.value ? { type: MarkerType.ArrowClosed, color: edgeRunColor(edgeRunStatus(edge)) } : defaultEdgeOptions.markerEnd,
-  style: runVisible.value ? { stroke: edgeRunColor(edgeRunStatus(edge)), strokeWidth: edgeRunStatus(edge) === 'active' ? 2.7 : 1.8 } : undefined,
+  markerEnd: runVisible.value && runPhase.value !== 'setup' ? { type: MarkerType.ArrowClosed, color: edgeRunColor(edgeRunStatus(edge)) } : defaultEdgeOptions.markerEnd,
+  style: runVisible.value && runPhase.value !== 'setup' ? { stroke: edgeRunColor(edgeRunStatus(edge)), strokeWidth: edgeRunStatus(edge) === 'active' ? 2.7 : 1.8 } : undefined,
   ariaLabel: `${nodeById(edge.source)?.name || '节点'} 到 ${nodeById(edge.target)?.name || '节点'}${edge.branch ? `，分支 ${edge.branch}` : ''}`
 })))
 
 watch(form, () => {
   if (!readyForChanges.value || saving.value) return
   saveState.value = 'dirty'
-  if (runVisible.value && !running.value) closeRunDock()
+  if (runVisible.value && runPhase.value !== 'setup' && !editingLocked.value) closeRunDock()
   lastRun.value = null
 }, { deep: true })
 watch(nodePositions, () => {
   if (readyForChanges.value && !saving.value) saveState.value = 'dirty'
 }, { deep: true })
 
-watch(() => route.params.id, () => loadWorkflow())
+let skipNextRouteLoad = false
+watch(() => route.params.id, () => {
+  if (skipNextRouteLoad) { skipNextRouteLoad = false; return }
+  loadWorkflow()
+})
 watch(leftCollapsed, value => localStorage.setItem('ai-service:workflow-palette-collapsed', String(value)))
 watch(rightCollapsed, value => localStorage.setItem('ai-service:workflow-inspector-collapsed', String(value)))
-watch(runDockExpanded, expanded => {
-  if (expanded && editorMode.value === 'canvas') void fitCanvas(false)
-})
+watch([testPanelOpen, leftCollapsed, rightCollapsed], () => { if (!loading.value) void fitCanvas(false) })
 
 onMounted(() => {
   window.addEventListener('resize', syncViewportMode)
   window.addEventListener('keydown', handleGlobalKeydown)
   window.addEventListener('beforeunload', handleBeforeUnload)
   loadWorkflow()
+  loadTestResources()
 })
 
 onBeforeUnmount(() => {
@@ -676,7 +630,57 @@ async function loadWorkflow() {
   }
 }
 
-async function saveWorkflow() {
+async function loadTestResources() {
+  resourceError.value = ''
+  const results = await Promise.allSettled([workflowAPI.templates(), knowledgeAPI.list(), systemAPI.aiStatus()])
+  if (results[0].status === 'fulfilled') templates.value = results[0].value
+  if (results[1].status === 'fulfilled') knowledgeBases.value = results[1].value
+  if (results[2].status === 'fulfilled') aiStatus.value = results[2].value
+  if (results.some(result => result.status === 'rejected')) resourceError.value = '部分测试资源加载失败'
+}
+
+function hideTestPanel() {
+  testPanelOpen.value = false
+  if (paletteBeforeTest !== null) { leftCollapsed.value = paletteBeforeTest; paletteBeforeTest = null }
+  if (runPhase.value === 'setup') closeRunDock()
+  void fitCanvas(false)
+}
+
+function highlightRunNode(id) {
+  selectedNodeId.value = id
+  followActiveNode.value = false
+}
+
+function fixRunIssue(id) {
+  hideTestPanel()
+  selectedNodeId.value = id || ''
+  inspectorView.value = id ? 'node' : 'workflow'
+  rightCollapsed.value = false
+  if (isCompact.value) leftCollapsed.value = true
+}
+
+function setNodeBranch(branch, target) {
+  if (editingLocked.value || !selectedCanvasNode.value) return
+  materializeEdges()
+  const source = selectedCanvasNode.value.id
+  form.value.edges = form.value.edges.filter(edge => edge.source !== source || (edge.branch && edge.branch !== branch))
+  if (target) form.value.edges.push(newEdge(source, target, branch))
+}
+
+function applyScenarioTemplate() {
+  if (editingLocked.value || !scenarioTemplate.value) return
+  if (!window.confirm('将用本场景模板替换当前节点和连线，保存后生效。继续吗？')) return
+  const template = JSON.parse(JSON.stringify(scenarioTemplate.value))
+  form.value.nodes = template.nodes
+  form.value.edges = template.edges
+  form.value.description = template.description
+  initializeCanvasLayout(true)
+  selectedNodeId.value = form.value.nodes[0]?.id || ''
+  void fitCanvas(false)
+  showNotice('已载入可运行模板，点击试运行可选择场景用例。', 'success')
+}
+
+async function saveWorkflow(forRun = false) {
   if (editingLocked.value) return
   if (!form.value.name.trim()) return showNotice('请输入工作流名称。', 'error')
   if (!form.value.nodes.length) return showNotice('至少需要一个流程节点。', 'error')
@@ -711,11 +715,15 @@ async function saveWorkflow() {
     lastSavedAt.value = formatTime(saved.updatedAt || new Date().toISOString())
     saveState.value = 'saved'
     lastRun.value = null
-    closeRunDock()
+    if (forRun !== true) closeRunDock()
     showNotice('工作流已保存。', 'success')
     await nextTick()
     readyForChanges.value = true
-    if (wasNew) await router.replace({ name: 'workflow-designer', params: { id: saved.id } })
+    if (wasNew) {
+      skipNextRouteLoad = true
+      await router.replace({ name: 'workflow-designer', params: { id: saved.id } })
+    }
+    return saved
   } catch (error) {
     saveState.value = 'error'
     showNotice(error.message || '工作流保存失败。', 'error')
@@ -725,8 +733,11 @@ async function saveWorkflow() {
 }
 
 function openRunSetup() {
-  if (isNew.value || !form.value.enabled || editingLocked.value || saving.value) return
-  if (saveState.value === 'dirty' || saveState.value === 'error') return showNotice('请先保存当前修改，再试运行。', 'info')
+  if (!testPanelOpen.value) paletteBeforeTest = leftCollapsed.value
+  leftCollapsed.value = true
+  testPanelOpen.value = true
+  if (editingLocked.value || saving.value) return
+  if (isCompact.value) { leftCollapsed.value = true; rightCollapsed.value = true }
   runPhase.value = 'setup'
   runRecord.value = null
   runSteps.value = {}
@@ -735,20 +746,16 @@ function openRunSetup() {
   clearEdgeAnimations()
   activeNodeId.value = ''
   runError.value = ''
-  runDockExpanded.value = true
+
   if (editorMode.value === 'canvas') void fitCanvas(false)
 }
 
-async function runWorkflow() {
-  if (runPhase.value !== 'setup' || running.value) return
-  let extraInput
-  try {
-    extraInput = JSON.parse(runExtraInput.value.trim() || '{}')
-    if (!extraInput || typeof extraInput !== 'object' || Array.isArray(extraInput)) throw new Error('其他输入参数必须是 JSON 对象。')
-  } catch (error) { return showNotice(error.message || '其他输入参数不是有效 JSON。', 'error') }
-  const question = runQuestion.value.trim()
-  const input = { ...extraInput, ...(question ? { question } : {}) }
-  if (!Object.keys(input).length) return showNotice('请输入测试问题或其他输入参数。', 'info')
+async function runWorkflow(payload) {
+  if (runPhase.value !== 'setup' || running.value || saving.value) return
+  if (isNew.value || ['dirty', 'error'].includes(saveState.value)) {
+    const saved = await saveWorkflow(true)
+    if (!saved) return
+  }
   runSteps.value = Object.fromEntries(form.value.nodes.map(node => [node.id, { nodeId: node.id, nodeName: node.name, nodeType: node.type, status: 'waiting' }]))
   traversedEdges.value = []
   activeEdgeKey.value = ''
@@ -756,15 +763,14 @@ async function runWorkflow() {
   activeNodeId.value = ''
   runElapsedMs.value = 0
   runRecord.value = null
-  runDockExpanded.value = false
-  const payload = { input, ...(typeof extraInput.knowledgeBaseId === 'string' && extraInput.knowledgeBaseId.trim() ? { knowledgeBaseId: extraInput.knowledgeBaseId.trim() } : {}) }
-  await executeRunStream((handlers, signal) => workflowAPI.runStream(routeId.value, payload, handlers, signal))
+  testPanelOpen.value = true
+  await executeRunStream((handlers, signal) => workflowAPI.runStream(form.value.id || routeId.value, payload, handlers, signal))
 }
 
 async function resumeWorkflow(approved) {
   if (runPhase.value !== 'waiting' || !runRecord.value?.id || running.value || approvalBusy.value || !canApprove.value) return
   approvalBusy.value = approved ? 'approve' : 'reject'
-  runDockExpanded.value = false
+
   try {
     await executeRunStream((handlers, signal) => workflowAPI.resumeStream(routeId.value, runRecord.value.id, { approved }, handlers, signal))
   } finally {
@@ -825,7 +831,7 @@ async function executeRunStream(openStream) {
         if (step.status === 'failed') {
           selectedNodeId.value = step.nodeId
           inspectorView.value = 'run'
-          runDockExpanded.value = true
+
         }
       }
     }, controller.signal)
@@ -844,7 +850,7 @@ async function executeRunStream(openStream) {
     }
     activeEdgeKey.value = ''
     markRemainingNotRun()
-    runDockExpanded.value = true
+
   } finally {
     if (requestToken === runRequestToken) {
       running.value = false
@@ -865,7 +871,7 @@ async function recoverRunAfterStreamFailure(streamError, requestToken) {
     } else if (persisted.status === 'running') {
       runPhase.value = 'interrupted'
       runError.value = `事件连接已中断（${streamError.message || '连接关闭'}）；服务端最后状态仍为执行中，请刷新状态。`
-      runDockExpanded.value = true
+
     } else if (persisted.status === 'interrupted') {
       showNotice('已从服务端恢复中断结果；为避免重复外部操作，本次运行不会自动重放。', 'error')
     }
@@ -892,7 +898,7 @@ async function refreshCurrentRun() {
     if (record.status === 'running') {
       runPhase.value = 'interrupted'
       runError.value = '服务端最后状态仍为执行中；当前页面没有活动事件流，请稍后再次刷新。'
-      runDockExpanded.value = true
+
     } else {
       showNotice('已同步服务端运行状态。', 'success')
     }
@@ -908,7 +914,10 @@ async function loadLatestRun(id, requestToken) {
     const runs = await workflowAPI.runs(id)
     if (routeId.value === id && requestToken === runRequestToken && !running.value && Array.isArray(runs)) {
       lastRun.value = runs.find(run => run.mode === 'execution') || null
-      if (lastRun.value) applyRunRecord(lastRun.value)
+      if (lastRun.value && ['waiting', 'running'].includes(lastRun.value.status)) {
+        applyRunRecord(lastRun.value)
+        testPanelOpen.value = true
+      }
     }
   } catch { /* history is optional while editing */ }
 }
@@ -943,20 +952,19 @@ function applyRunRecord(record) {
   if (focusStep) {
     selectedNodeId.value = focusStep.nodeId
     inspectorView.value = 'run'
-    runDockExpanded.value = true
-  } else {
-    runDockExpanded.value = false
   }
 }
 
 function showLastRun() {
   if (!lastRun.value) return
   applyRunRecord(lastRun.value)
+  testPanelOpen.value = true
 }
 
 function closeRunDock(force = false) {
   if (editingLocked.value && !force) return
   runPhase.value = 'idle'
+  testPanelOpen.value = false
   runRecord.value = null
   runSteps.value = {}
   traversedEdges.value = []
@@ -964,7 +972,7 @@ function closeRunDock(force = false) {
   clearEdgeAnimations()
   activeNodeId.value = ''
   approvalBusy.value = ''
-  runDockExpanded.value = false
+
   if (inspectorView.value === 'run') inspectorView.value = selectedNodeId.value ? 'node' : 'workflow'
 }
 
@@ -973,7 +981,7 @@ function markRemainingNotRun() {
 }
 
 function nodeRunStatus(id) {
-  if (!runVisible.value) return 'idle'
+  if (!runVisible.value || runPhase.value === 'setup') return 'idle'
   if (runPhase.value === 'waiting' && id === activeNodeId.value) return 'approval-waiting'
   return runSteps.value[id]?.status || 'waiting'
 }
@@ -1019,35 +1027,6 @@ function formatPayload(value) {
   try { return JSON.stringify(value, null, 2) ?? '无' } catch { return String(value) }
 }
 
-function nodeConfigHint(type) {
-  return ({
-    input: '开始节点接收本次测试输入，无需额外配置。',
-    condition: '示例：{"field":"category","operator":"equals","value":"退款"}；按 true / false 连线分支。',
-    knowledge: '示例：{"knowledgeBaseId":"知识库 ID","questionField":"question","topK":3}；需要可检索的真实文档。',
-    tool: '示例：{"operation":"queryOrder","argumentField":"orderNo"}；支持只读订单、客户权益、业务主体与工单查询。',
-    model: '示例：{"prompt":"请总结用户问题"}；需要服务端模型已配置。',
-    approval: '人工处理节点会暂停本次运行；在运行面板同意或拒绝后继续。',
-    output: '结束节点返回上一步的真实输出，无需额外配置。'
-  })[type] || '配置必须是 JSON 对象。'
-}
-
-function nodeConfigTemplate(type) {
-  return ({
-    condition: { field: 'category', operator: 'equals', value: '退款' },
-    knowledge: { knowledgeBaseId: '请替换为真实知识库 ID', questionField: 'question', topK: 3 },
-    tool: { operation: 'queryOrder', argumentField: 'orderNo' },
-    model: { prompt: '请根据输入给出准确、简洁的回答。' }
-  })[type] || null
-}
-
-function fillNodeConfigTemplate(node) {
-  if (editingLocked.value) return
-  const template = nodeConfigTemplate(node.type)
-  if (!template) return
-  if (node.config && !['{}', ''].includes(node.config.trim()) && !window.confirm('填入示例配置会覆盖当前节点配置，继续吗？')) return
-  node.config = JSON.stringify(template, null, 2)
-}
-
 function formatDuration(ms) {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)} 秒` : `${Math.max(0, Math.round(ms || 0))} ms`
 }
@@ -1087,6 +1066,7 @@ function toggleLeftPanel() {
 }
 
 function toggleRightPanel() {
+  testPanelOpen.value = false
   rightCollapsed.value = !rightCollapsed.value
   if (isCompact.value && !rightCollapsed.value) leftCollapsed.value = true
 }
@@ -1098,7 +1078,7 @@ function closeOverlayPanels() {
 
 function selectNode(id) {
   selectedNodeId.value = id
-  inspectorView.value = runVisible.value ? 'run' : 'node'
+  inspectorView.value = runVisible.value && runPhase.value !== 'setup' ? 'run' : 'node'
   followActiveNode.value = false
   if (isCompact.value) {
     rightCollapsed.value = false
@@ -1108,7 +1088,7 @@ function selectNode(id) {
 
 function highlightNode(id) {
   selectedNodeId.value = id
-  inspectorView.value = runVisible.value ? 'run' : 'node'
+  inspectorView.value = runVisible.value && runPhase.value !== 'setup' ? 'run' : 'node'
   followActiveNode.value = false
 }
 
@@ -1212,7 +1192,7 @@ function handleFlowConnect(connection) {
   if (source.type === 'condition') {
     const outgoing = edges.filter(edge => edge.source === source.id)
     if (outgoing.length === 1 && !outgoing[0].branch) edges = edges.filter(edge => edge.source !== source.id)
-    branch = !edges.some(edge => edge.source === source.id && edge.branch === 'true') ? 'true' : 'false'
+    branch = ['true', 'false'].includes(connection.sourceHandle) ? connection.sourceHandle : !edges.some(edge => edge.source === source.id && edge.branch === 'true') ? 'true' : 'false'
     if (edges.some(edge => edge.source === source.id && edge.branch === branch)) return showNotice('true 和 false 分支已配置，请在“流程设置”中修改连线。', 'info')
   } else {
     edges = edges.filter(edge => edge.source !== source.id)
@@ -1283,14 +1263,17 @@ function autoLayout() {
 
 async function fitCanvas(smooth = true) {
   await nextTick()
+  await new Promise(resolve => requestAnimationFrame(resolve))
   try {
-    // The expanded run dock reduces canvas height; cap the zoom so lower
-    // branches remain visible instead of being clipped below the dock.
-    const maxZoom = runVisible.value && runDockExpanded.value ? Math.min(fitViewOptions.maxZoom, .63) : fitViewOptions.maxZoom
-    await flowApi.fitView({ ...fitViewOptions, maxZoom, duration: smooth ? 240 : 0 })
-    if (runVisible.value && runDockExpanded.value && flowApi.getViewport().zoom > maxZoom) {
-      await flowApi.zoomTo(maxZoom, { duration: smooth ? 240 : 0 })
-    }
+    const element = canvasElement.value
+    if (!element || !form.value.nodes.length) return
+    const positions = form.value.nodes.map((node, index) => positionForNode(node.id, index))
+    const left = Math.min(...positions.map(point => point.x)), top = Math.min(...positions.map(point => point.y))
+    const width = Math.max(...positions.map(point => point.x)) - left + 232
+    const height = Math.max(...positions.map(point => point.y)) - top + (runVisible.value && runPhase.value !== 'setup' ? 132 : 112)
+    const zoom = Math.max(.35, Math.min(1, (element.clientWidth - 80) / width, (element.clientHeight - 80) / height))
+    await flowApi.setViewport({ x: (element.clientWidth - width * zoom) / 2 - left * zoom,
+      y: (element.clientHeight - height * zoom) / 2 - top * zoom, zoom }, { duration: smooth ? 240 : 0 })
   } catch { /* flow instance can be unavailable while changing routes */ }
 }
 
@@ -1348,7 +1331,13 @@ function syncViewportMode() {
 }
 
 function handleGlobalKeydown(event) {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+    event.preventDefault()
+    if (!editingLocked.value && !saving.value) void saveWorkflow()
+    return
+  }
   if (event.key !== 'Escape') return
+  if (testPanelOpen.value) return hideTestPanel()
   if (isCompact.value && !rightCollapsed.value) return void (rightCollapsed.value = true)
   if (isCompact.value && !leftCollapsed.value) return void (leftCollapsed.value = true)
   clearNodeSelection()
@@ -1435,3 +1424,4 @@ function formatTime(value) {
 
 @media(prefers-reduced-motion:reduce){.node-palette,.node-inspector,.flow-node-card,.run-dock-toggle svg{transition:none}.save-state.saving>span,.loading-mark,.run-dock-indicator.running,.running .run-status-mark,.run-status-mark.running,.run-dock-toggle svg.refresh-spinning,:deep(.vue-flow__edge.run-edge-active .vue-flow__edge-path){animation:none}}
 </style>
+<style scoped src="../assets/workflow-designer.css"></style>

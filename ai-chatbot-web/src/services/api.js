@@ -219,6 +219,7 @@ export const pendingActionAPI = {
 }
 
 export const workflowAPI = {
+  templates: () => request('/api/v1/workflows/templates'),
   list: () => request('/api/v1/workflows'),
   get: (id) => request(`/api/v1/workflows/${id}`),
   create: (payload) => request('/api/v1/workflows', {

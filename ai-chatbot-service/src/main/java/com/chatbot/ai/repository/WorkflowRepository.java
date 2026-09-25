@@ -4,6 +4,7 @@ import com.chatbot.ai.domain.workflow.WorkflowDefinition;
 import com.chatbot.ai.domain.workflow.WorkflowEdge;
 import com.chatbot.ai.domain.workflow.WorkflowNode;
 import com.chatbot.ai.domain.workflow.WorkflowRun;
+import com.chatbot.ai.service.WorkflowTemplateCatalog;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -67,12 +68,56 @@ public class WorkflowRepository {
                 """);
         Integer count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM ai_workflow", Integer.class);
         if (count != null && count == 0) seedDefaults();
+        upgradeUnconfiguredDefaults();
         seedReliableDemoIfMissing();
         recoverInterruptedRuns();
     }
 
     public List<WorkflowDefinition> findAll() {
         return jdbcTemplate.query("SELECT * FROM ai_workflow ORDER BY updated_at DESC", this::mapWorkflow);
+    }
+
+    // Only replace the exact, empty legacy seeds. User-authored definitions and configured
+    // nodes are never overwritten. Existing run snapshots remain independent of this update.
+    private void upgradeUnconfiguredDefaults() {
+        Map<String, List<String>> legacySignatures = Map.of(
+            "commerce-after-sale", List.of("identify:input:识别订单", "classify:condition:判断诉求", "policy:knowledge:检索售后规则", "eligibility:tool:资格校验", "confirm:approval:用户确认", "ticket:output:生成服务单"),
+            "saas-incident", List.of("tenant:input:识别租户", "diagnose:knowledge:知识诊断", "severity:condition:判断等级", "workaround:tool:执行止损", "escalate:output:升级工单"),
+            "it-service-request", List.of("identity:input:身份核验", "category:condition:服务分类", "selfservice:knowledge:自助排障", "execute:approval:审批执行", "close:output:结果回访"),
+            "merchant-appeal", List.of("merchant:input:识别商家", "rule:knowledge:定位规则", "materials:condition:材料检查", "review:approval:人工复核", "notify:output:结果通知"));
+        Map<String, String> legacyDescriptions = Map.of(
+            "commerce-after-sale", "从订单核验、问题分类到退款/换货/工单的标准售后闭环。",
+            "saas-incident", "面向企业租户的故障定位、临时止损和分级升级流程。",
+            "it-service-request", "覆盖账号权限、设备、网络与软件服务的内部请求流程。",
+            "merchant-appeal", "围绕规则命中、证据补充、复核与结果通知的申诉闭环。");
+        Map<String, List<String>> legacyNodeDescriptions = Map.of(
+            "commerce-after-sale", List.of("校验订单号、用户与商品", "区分退款、换货、物流与质量问题", "从已选知识库获取时效与条件", "检查订单状态和可执行动作", "确认方案后才执行业务动作", "记录结论、证据与下一步"),
+            "saas-incident", List.of("确认租户、版本与影响范围", "检索已知问题和处置手册", "依据影响用户数和核心链路定级", "提供可回退的临时方案", "携带诊断信息进入研发队列"),
+            "it-service-request", List.of("确认人员、部门与设备", "判断账号、权限、设备或网络", "匹配标准操作与安全要求", "高风险权限需负责人确认", "记录解决方案并确认恢复"),
+            "merchant-appeal", List.of("确认店铺与处罚单", "读取适用条款与申诉窗口", "核对证明材料完整性", "复杂争议进入运营审核", "同步结论、依据和后续动作"));
+        for (var template : WorkflowTemplateCatalog.templates()) {
+            var existing = findAll().stream().filter(item -> template.code().equals(item.getCode())).findFirst();
+            if (existing.isEmpty()) {
+                // Existing installations receive the previously missing knowledge scenario too.
+                if (!List.of("knowledge-research", "general-assistant").contains(template.code())) continue;
+                Instant now = Instant.now();
+                save(WorkflowDefinition.builder().id(UUID.randomUUID().toString()).code(template.code())
+                    .name(template.name()).scenarioCode(template.scenarioCode()).description(template.description())
+                    .enabled(true).nodes(template.nodes()).edges(template.edges()).createdAt(now).updatedAt(now).build());
+                continue;
+            }
+            var workflow = existing.get();
+            if (workflow.getEdges() != null || !template.scenarioCode().equals(workflow.getScenarioCode())
+                    || !template.name().equals(workflow.getName()) || workflow.getNodes() == null) continue;
+            var signature = workflow.getNodes().stream().map(node -> node.getId() + ":" + node.getType() + ":" + node.getName()).toList();
+            if (!signature.equals(legacySignatures.get(template.code())) || workflow.getNodes().stream()
+                    .anyMatch(node -> node.getConfig() != null && !node.getConfig().isBlank() && !"{}".equals(node.getConfig().trim()))) continue;
+            if (!java.util.Objects.equals(workflow.getDescription(), legacyDescriptions.get(template.code()))
+                    || !workflow.getNodes().stream().map(WorkflowNode::getDescription).toList().equals(legacyNodeDescriptions.get(template.code()))) continue;
+            workflow.setNodes(template.nodes()); workflow.setEdges(template.edges());
+            workflow.setDescription(template.description()); workflow.setUpdatedAt(Instant.now());
+            save(workflow);
+        }
     }
 
     public Optional<WorkflowDefinition> findById(String id) {
