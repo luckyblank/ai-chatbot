@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.ai.model.function.FunctionCallback;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
+import reactor.core.Disposable;
 
 import java.time.Duration;
 import java.util.List;
@@ -85,6 +86,30 @@ class KnowledgeChatServiceStreamingCompatibilityTest {
             assertThat(interrupted.await(2, TimeUnit.SECONDS)).isTrue();
         } finally {
             request.interrupt();
+        }
+    }
+
+    @Test
+    void cancellingBufferedStreamInterruptsTheModelTask() throws Exception {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch interrupted = new CountDownLatch(1);
+        Disposable subscription = KnowledgeChatService.bufferedModelEvents(() -> {
+            started.countDown();
+            try {
+                Thread.sleep(10_000);
+            } catch (InterruptedException exception) {
+                interrupted.countDown();
+                Thread.currentThread().interrupt();
+            }
+            return new KnowledgeChatService.AnswerResult("late answer", List.of(), List.of());
+        }, Duration.ZERO).subscribe();
+
+        try {
+            assertThat(started.await(2, TimeUnit.SECONDS)).isTrue();
+            subscription.dispose();
+            assertThat(interrupted.await(2, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            subscription.dispose();
         }
     }
 

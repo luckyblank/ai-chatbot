@@ -175,18 +175,17 @@ public class KnowledgeChatService {
             long modelStartedAt = System.nanoTime();
 
             if (requiresBufferedToolCall(prepared.toolCallbacks())) {
-                try {
+                return bufferedModelEvents(() -> {
                     String answer = callModel(prepared, conversationId, traceId);
                     AnswerResult result = completeSuccessfulAnswer(
                             prepared, traceId, modelStartedAt, answer);
                     traceClosed.set(true);
-                    return bufferedAnswerEvents(result, BUFFERED_DELTA_DELAY);
-                } catch (RuntimeException exception) {
+                    return result;
+                }, BUFFERED_DELTA_DELAY).doFinally(signal -> {
                     if (traceClosed.compareAndSet(false, true)) {
                         toolTraceRecorder.discard(traceId);
                     }
-                    throw exception;
-                }
+                });
             }
 
             StringBuilder fullAnswer = new StringBuilder();
@@ -293,6 +292,12 @@ public class KnowledgeChatService {
 
     static boolean requiresBufferedToolCall(List<FunctionCallback> callbacks) {
         return callbacks != null && !callbacks.isEmpty();
+    }
+
+    static Flux<AnswerStreamEvent> bufferedModelEvents(Callable<AnswerResult> answerTask, Duration delay) {
+        return Mono.fromCallable(answerTask)
+                .subscribeOn(Schedulers.boundedElastic())
+                .flatMapMany(result -> bufferedAnswerEvents(result, delay));
     }
 
     static Flux<AnswerStreamEvent> bufferedAnswerEvents(AnswerResult result, Duration delay) {
