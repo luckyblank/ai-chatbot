@@ -56,6 +56,40 @@ test('EOF without a complete event reports interruption', async () => {
   }, null)
 })
 
+test('stopping after a partial answer aborts the stream and releases its reader', async () => {
+  const previousFetch = globalThis.fetch
+  const controller = new AbortController()
+  let cancelled = false
+  let readCount = 0
+  globalThis.fetch = async (_url, options) => ({
+    ok: true,
+    body: {
+      getReader() {
+        return {
+          read() {
+            if (readCount++ === 0) {
+              return Promise.resolve({ done: false, value: encoder.encode('event: delta\ndata: {"delta":"部分回答"}\n\n') })
+            }
+            if (options.signal.aborted) return Promise.reject(new DOMException('已停止', 'AbortError'))
+            return new Promise((_resolve, reject) => options.signal.addEventListener('abort',
+              () => reject(new DOMException('已停止', 'AbortError')), { once: true }))
+          },
+          async cancel() { cancelled = true },
+          releaseLock() { }
+        }
+      }
+    }
+  })
+  try {
+    await assert.rejects(conversationAPI.sendStream('1', 'test', [], {
+      delta: () => controller.abort()
+    }, controller.signal), { name: 'AbortError' })
+    assert.equal(cancelled, true)
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
 test('conversation stream carries a stable request id and CSRF header', async () => {
   const previousFetch = globalThis.fetch
   const previousDocument = globalThis.document

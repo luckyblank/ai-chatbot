@@ -18,14 +18,31 @@
         <div class="history-summary"><span>{{ historyScope === 'all' ? '全部历史' : '场景与知识范围' }}</span><small>{{ filteredConversations.length }}</small></div>
         <div class="session-list" aria-live="polite">
           <section v-for="group in conversationGroups" :key="group.label" class="session-group">
-            <h3><span>{{ group.label }}</span><small>{{ group.items.length }}</small></h3>
-            <article v-for="session in group.items" :key="session.id" :class="{ active: session.id === currentConversationId }">
-              <button class="session-open" type="button" :disabled="sending" :aria-current="session.id === currentConversationId ? 'true' : undefined" :aria-label="`打开会话：${session.title || '新对话'}`" @click="selectConversation(session.id)">
-                <ChatBubbleLeftRightIcon class="session-icon" />
-                <span class="session-copy"><span class="title-viewport"><strong v-title-overflow class="title-track">{{ session.title || '新对话' }}</strong></span><small>{{ conversationMeta(session) }}</small></span>
+            <h3>
+              <button
+                type="button"
+                class="session-group-toggle"
+                :class="{ 'is-collapsed': collapsedConversationGroups.has(group.label) }"
+                :aria-expanded="!collapsedConversationGroups.has(group.label)"
+                :aria-controls="`session-group-items-${group.id}`"
+                @click="toggleConversationGroup(group.label)"
+              >
+                <span>{{ group.label }}</span>
+                <small>{{ group.items.length }}</small>
+                <ChevronDownIcon aria-hidden="true" />
               </button>
-              <span class="session-actions" aria-label="会话操作"><button type="button" title="修改名称" :aria-label="`修改会话名称：${session.title || '新对话'}`" @click.stop="startRename(session)"><PencilSquareIcon /></button><button type="button" title="删除会话" :aria-label="`删除会话：${session.title || '新对话'}`" @click.stop="startDelete(session)"><TrashIcon /></button></span>
-            </article>
+            </h3>
+            <Transition name="session-group-content">
+              <div v-show="!collapsedConversationGroups.has(group.label)" :id="`session-group-items-${group.id}`" class="session-group-items">
+                <article v-for="session in group.items" :key="session.id" :class="{ active: session.id === currentConversationId }">
+                  <button class="session-open" type="button" :disabled="sending" :aria-current="session.id === currentConversationId ? 'true' : undefined" :aria-label="`打开会话：${session.title || '新对话'}`" @click="selectConversation(session.id)">
+                    <ChatBubbleLeftRightIcon class="session-icon" />
+                    <span class="session-copy"><span class="title-viewport"><strong v-title-overflow class="title-track">{{ session.title || '新对话' }}</strong></span><small>{{ conversationMeta(session) }}</small></span>
+                  </button>
+                  <span class="session-actions" aria-label="会话操作"><button type="button" title="修改名称" :aria-label="`修改会话名称：${session.title || '新对话'}`" @click.stop="startRename(session)"><PencilSquareIcon /></button><button type="button" title="删除会话" :aria-label="`删除会话：${session.title || '新对话'}`" @click.stop="startDelete(session)"><TrashIcon /></button></span>
+                </article>
+              </div>
+            </Transition>
           </section>
           <div v-if="!filteredConversations.length" class="empty-list"><ClockIcon /><strong>{{ emptyConversationTitle }}</strong><span>{{ emptyConversationHint }}</span></div>
         </div>
@@ -72,8 +89,8 @@
                   <summary><span><CommandLineIcon />链路追溯</span><small>{{ message.traces.length }} 个步骤</small></summary>
                   <ol class="trace-list"><li v-for="(step, traceIndex) in message.traces" :key="traceIndex" :class="step.status"><span class="trace-dot"></span><div><div class="trace-heading"><span class="phase-badge">{{ tracePhaseLabel(step.phase) }}</span><strong>{{ step.title }}</strong><time v-if="step.durationMs !== null && step.durationMs !== undefined">{{ step.durationMs }} ms</time></div><p>{{ step.detail }}</p></div></li></ol>
                 </details>
-                <div v-if="message.citations?.length" class="citations"><strong>参考来源</strong><details v-for="(citation, citationIndex) in message.citations" :key="citationIndex"><summary>{{ citation.fileName }}<span v-if="citation.pageNumber"> · 第 {{ citation.pageNumber }} 页</span></summary><p>{{ citation.excerpt }}</p></details></div>
-                <div v-if="message.interrupted" class="message-interruption" role="alert"><ExclamationCircleIcon /><span>回答中断：{{ message.interruptionMessage || '连接已断开' }}。可重新生成本轮回答。</span><button type="button" :disabled="sending" @click="retryInterruptedAnswer(index)">重新生成</button><button type="button" :disabled="sending" @click="discardInterruptedAnswer">放弃本轮</button></div>
+                <CitationSources v-if="message.citations?.length" :citations="message.citations" />
+                <div v-if="message.interrupted" class="message-interruption" role="alert"><ExclamationCircleIcon /><span>回答中断：{{ message.interruptionMessage || '连接已断开' }}。可重新生成或同步会话后继续。</span><button type="button" :disabled="sending" @click="retryInterruptedAnswer(index)">重新生成</button><button type="button" :disabled="sending" @click="discardInterruptedAnswer">同步并继续</button></div>
             </div>
             <div v-if="!message.streaming && message.content" class="message-actions" :aria-label="`${message.role === 'user' ? '用户消息' : 'AI 回复'}操作`">
               <button v-if="message.role === 'user'" type="button" title="编辑消息" aria-label="编辑消息" :disabled="sending" @click="startMessageEdit(message, index)"><PencilSquareIcon /><span>{{ editingMessageIndex === index ? '编辑中' : '编辑' }}</span></button>
@@ -112,8 +129,9 @@
         </div>
         <input ref="fileInput" class="file-input" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md,.markdown" @change="selectAttachments">
         <button class="attach-button" type="button" title="添加附件" aria-label="添加附件" @click="fileInput?.click()"><PaperClipIcon /></button>
-        <textarea ref="composerTextarea" v-model="input" rows="1" :disabled="sending" :placeholder="editingMessageIndex >= 0 ? '修改这条消息' : '输入问题；知识库为可选项'" @keydown.enter.exact.prevent="sendMessage" @paste="onAttachmentPaste"></textarea>
-        <button class="send-button" type="submit" :aria-label="editingMessageIndex >= 0 ? '发送修改后的消息' : '发送消息'" :disabled="!input.trim() || sending"><PaperAirplaneIcon /></button>
+        <textarea ref="composerTextarea" v-model="input" rows="1" :disabled="sending" :placeholder="editingMessageIndex >= 0 ? '修改这条消息' : selectedScenarioCode === 'commerce-support' ? '描述售后问题；可提供客户编号或订单号' : '输入问题；知识库为可选项'" @keydown.enter.exact.prevent="sendMessage" @paste="onAttachmentPaste"></textarea>
+        <button v-if="hasStreamingMessage" class="send-button stop-button" type="button" title="停止生成" aria-label="停止生成" @click="stopGeneration">停止</button>
+        <button v-else class="send-button" type="submit" :aria-label="editingMessageIndex >= 0 ? '发送修改后的消息' : '发送消息'" :disabled="!input.trim() || sending"><PaperAirplaneIcon /></button>
         <div class="composer-foot"><span>{{ editingMessageIndex >= 0 ? 'Enter 重新发送 · Esc 取消编辑' : 'Enter 发送 · Shift + Enter 换行' }}</span><span>{{ selectedKnowledgeBaseId ? '知识增强' : '普通模型' }} · {{ selectedScenario.shortName }}</span></div>
         <div v-if="draggingFiles" class="composer-drop-hint" aria-hidden="true">松开以添加附件</div>
       </form>
@@ -124,8 +142,8 @@
       <div class="context-sidebar-content">
         <header><span>场景指引</span><RouterLink :to="{ path: '/scenarios', query: { scenario: selectedScenario.code, edit: '1' } }">编辑场景</RouterLink></header>
         <section><label>当前场景</label><h2>{{ selectedScenario.name }}</h2><p>{{ selectedScenario.summary }}</p></section>
-        <section><label>标准流程</label><ol class="process-list"><li v-for="(step, index) in selectedScenario.process" :key="step"><span>{{ index + 1 }}</span>{{ step }}</li></ol></section>
-        <section><label>允许的业务工具</label><div v-if="selectedScenario.tools.length" class="tool-list"><span v-for="tool in selectedScenario.tools" :key="tool"><WrenchScrewdriverIcon />{{ tool }}</span></div><p v-else>该场景不开放业务工具。</p></section>
+        <section><label>建议处理步骤</label><ol class="process-list"><li v-for="(step, index) in selectedScenario.process" :key="step"><span>{{ index + 1 }}</span>{{ step }}</li></ol></section>
+        <section><label>允许的业务工具</label><div v-if="selectedScenario.tools.length" class="tool-list"><span v-for="tool in selectedScenario.tools" :key="tool"><WrenchScrewdriverIcon />{{ tool }}</span></div><p v-else>该场景不开放业务工具。</p><p v-if="selectedScenarioCode === 'commerce-support'">可用客户编号查询其订单；客服登录账号 ID 不能代替客户编号。</p></section>
         <section><label>知识上下文</label><div class="knowledge-context"><CircleStackIcon /><span><strong>{{ currentKnowledgeBase?.name || '未选择知识库' }}</strong><small>{{ currentKnowledgeBase ? '回答将执行向量检索' : '当前为普通聊天模式' }}</small></span></div><RouterLink class="manage-knowledge" :to="selectedKnowledgeBaseId ? { path: '/knowledge-bases', query: { knowledge: selectedKnowledgeBaseId } } : '/knowledge-bases'">进入知识中心</RouterLink></section>
         <section class="guardrail"><ShieldCheckIcon /><div><label>业务边界</label><p>{{ selectedScenario.guardrail }}</p></div></section>
       </div>
@@ -150,8 +168,9 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
-import { ArrowUpRightIcon, ChatBubbleLeftRightIcon, CheckCircleIcon, CheckIcon, CircleStackIcon, ClipboardDocumentIcon, ClockIcon, CommandLineIcon, DocumentIcon, ExclamationCircleIcon, InformationCircleIcon, MagnifyingGlassIcon, PaperAirplaneIcon, PaperClipIcon, PencilSquareIcon, PlusIcon, ShieldCheckIcon, SparklesIcon, TrashIcon, UserIcon, WrenchScrewdriverIcon, XMarkIcon } from '@heroicons/vue/24/outline'
+import { ArrowUpRightIcon, ChatBubbleLeftRightIcon, CheckCircleIcon, CheckIcon, ChevronDownIcon, CircleStackIcon, ClipboardDocumentIcon, ClockIcon, CommandLineIcon, DocumentIcon, ExclamationCircleIcon, InformationCircleIcon, MagnifyingGlassIcon, PaperAirplaneIcon, PaperClipIcon, PencilSquareIcon, PlusIcon, ShieldCheckIcon, SparklesIcon, TrashIcon, UserIcon, WrenchScrewdriverIcon, XMarkIcon } from '@heroicons/vue/24/outline'
 import ChatMarkdown from '../components/ChatMarkdown.vue'
+import CitationSources from '../components/CitationSources.vue'
 import ImagePreview from '../components/ImagePreview.vue'
 import PendingActionCard from '../components/PendingActionCard.vue'
 import PanelEdgeHandleIcon from '../components/icons/PanelEdgeHandleIcon.vue'
@@ -170,6 +189,7 @@ const draggingFiles = ref(false)
 const workspaceLoaded = ref(false)
 const mobileSessionsOpen = ref(false)
 const historyScope = ref(localStorage.getItem('conversation-history-scope') === 'all' ? 'all' : 'current')
+const collapsedConversationGroups = ref(new Set(readCollapsedConversationGroups()))
 const sessionSidebarCollapsed = ref(localStorage.getItem('conversation-sessions-collapsed') === 'true')
 const contextSidebarCollapsed = ref(localStorage.getItem('conversation-context-collapsed') === 'true')
 const toast = ref(null)
@@ -199,7 +219,7 @@ const conversationGroups = computed(() => {
     if (!groups.has(label)) groups.set(label, [])
     groups.get(label).push(session)
   })
-  return Array.from(groups, ([label, items]) => ({ label, items }))
+  return Array.from(groups, ([label, items]) => ({ label, id: label.replace(/\s+/g, '-'), items }))
 })
 const emptyConversationTitle = computed(() => {
   if (conversationSearch.value.trim()) return '没有匹配的会话'
@@ -209,6 +229,7 @@ const emptyConversationHint = computed(() => conversationSearch.value.trim() ? '
 const hasStreamingMessage = computed(() => messages.value.some(item => item.streaming))
 let conversationRequestVersion = 0
 let activeStreamController = null
+const manuallyStoppedStreams = new WeakSet()
 let streamScrollFrame = 0
 let toastTimer = 0
 let copyTimer = 0
@@ -650,9 +671,11 @@ async function resendEditedMessage() {
     catch (refreshError) { notice.value = `回复已重新生成，但会话列表同步失败：${refreshError.message}` }
   } catch (error) {
     if (assistantMessage) assistantMessage.streaming = false
-    if (error.name !== 'AbortError' && !assistantMessage?.completed) {
+    if ((error.name !== 'AbortError' || manuallyStoppedStreams.has(streamController)) && !assistantMessage?.completed) {
       if (!assistantMessage) notice.value = `消息发送失败：${error.message}`
-      else markInterrupted(assistantMessage, error, { kind: 'regenerate', userIndex: index, previousCreatedAt: originalMessage.createdAt, requestId })
+      else markInterrupted(assistantMessage,
+        manuallyStoppedStreams.has(streamController) ? new Error('已手动停止') : error,
+        { kind: 'regenerate', userIndex: index, previousCreatedAt: originalMessage.createdAt, requestId })
     }
   } finally {
     if (activeStreamController === streamController) activeStreamController = null
@@ -691,7 +714,7 @@ async function writeClipboardText(content) {
 }
 async function sendMessage() {
   const content = input.value.trim(); if (!content || sending.value) return
-  if (messages.value.some(message => message.interrupted)) { notice.value = '请先重新生成或放弃中断的回答，再发送新消息。'; return }
+  if (messages.value.some(message => message.interrupted)) { notice.value = '请先重新生成或同步中断的回答，再发送新消息。'; return }
   if (editingMessageIndex.value >= 0) { await resendEditedMessage(); return }
   const isFirstQuestion = !messages.value.some(message => message.role === 'user')
   sending.value = true
@@ -759,7 +782,9 @@ async function sendMessage() {
     } catch (refreshError) { notice.value = `回答已生成，但会话名称同步失败：${refreshError.message}` }
   } catch (error) {
     if (error.name === 'AbortError') {
-      if (assistantMessage) assistantMessage.streaming = false
+      if (assistantMessage && manuallyStoppedStreams.has(streamController) && !assistantMessage.completed) {
+        markInterrupted(assistantMessage, new Error('已手动停止'), { kind: 'send', userIndex, requestId })
+      } else if (assistantMessage) assistantMessage.streaming = false
     } else if (!assistantMessage?.completed) {
       if (assistantMessage) markInterrupted(assistantMessage, error, { kind: 'send', userIndex, requestId })
       else notice.value = `消息发送失败：${error.message}`
@@ -778,7 +803,15 @@ function markInterrupted(message, error, retry) {
   message.interrupted = true
   message.interruptionMessage = error.message || '连接已断开'
   message.retry = retry
-  notice.value = '回答已中断，可在该回答下方重新生成或放弃本轮。'
+  notice.value = error.message === '已手动停止'
+    ? '已停止生成。可重新生成或同步会话后继续。'
+    : '回答已中断，可在该回答下方重新生成或同步会话。'
+}
+function stopGeneration() {
+  const controller = activeStreamController
+  if (!controller || controller.signal.aborted || !hasStreamingMessage.value) return
+  manuallyStoppedStreams.add(controller)
+  controller.abort()
 }
 async function discardInterruptedAnswer() {
   if (sending.value || !currentConversationId.value) return
@@ -862,7 +895,10 @@ async function retryInterruptedAnswer(index) {
   } catch (error) {
     if (streamStarted) {
       assistant.streaming = false
-      if (error.name !== 'AbortError' && !assistant.completed) markInterrupted(assistant, error, retry)
+      if ((error.name !== 'AbortError' || manuallyStoppedStreams.has(controller)) && !assistant.completed) {
+        markInterrupted(assistant,
+          manuallyStoppedStreams.has(controller) ? new Error('已手动停止') : error, retry)
+      }
     } else {
       notice.value = `重试前核对会话失败：${error.message}`
     }
@@ -934,6 +970,21 @@ function conversationMeta(session) {
   const scenarioName = scenarioByCode(session.scenarioCode || 'general').shortName
   const knowledgeName = session.knowledgeBaseId ? knowledgeBaseName(session.knowledgeBaseId) : '普通对话'
   return `${scenarioName} · ${knowledgeName}`
+}
+function readCollapsedConversationGroups() {
+  try {
+    const stored = JSON.parse(localStorage.getItem('conversation-collapsed-groups') || '[]')
+    return Array.isArray(stored) ? stored.filter(label => typeof label === 'string') : []
+  } catch {
+    return []
+  }
+}
+function toggleConversationGroup(label) {
+  const next = new Set(collapsedConversationGroups.value)
+  if (next.has(label)) next.delete(label)
+  else next.add(label)
+  collapsedConversationGroups.value = next
+  localStorage.setItem('conversation-collapsed-groups', JSON.stringify([...next]))
 }
 function conversationDateGroup(value) {
   if (!value) return '更早'
@@ -1043,4 +1094,17 @@ function queueScrollToBottom() {
 .composer-edit-state>span{display:flex;align-items:center;gap:8px}.composer-edit-state>span>svg{width:17px}.composer-edit-state strong,.composer-edit-state small{display:inline}.composer-edit-state strong{font-size:12px}.composer-edit-state small{margin-left:8px;color:var(--text-soft);font-size:10px}
 .composer-edit-state>button{width:28px;height:28px;display:grid;place-items:center;padding:0;color:var(--text-soft);background:transparent;border:0;border-radius:6px}.composer-edit-state>button:hover{color:var(--primary);background:var(--surface)}.composer-edit-state>button svg{width:15px}
 @media(max-width:760px){.composer-edit-state small{display:none}}
+.composer .stop-button{color:var(--danger);background:color-mix(in srgb,var(--danger) 10%,var(--surface));border:1px solid color-mix(in srgb,var(--danger) 28%,var(--border-color));font-size:11px;font-weight:700;cursor:pointer}
+.composer .stop-button:hover{background:color-mix(in srgb,var(--danger) 17%,var(--surface))}
+
+.session-group h3{padding:0}
+.session-group-toggle{width:100%;display:flex;align-items:center;gap:6px;padding:7px;color:inherit;background:transparent;border:0;border-radius:6px;text-align:left;font:inherit;cursor:pointer;transition:color .16s ease,background-color .16s ease}
+.session-group-toggle>span{margin-right:auto}
+.session-group-toggle:hover{color:var(--text-color);background:color-mix(in srgb,var(--surface) 68%,transparent)}
+.session-group-toggle:focus-visible{outline:2px solid color-mix(in srgb,var(--primary) 65%,transparent);outline-offset:1px}
+.session-group-toggle>svg{width:13px;height:13px;flex:none;transition:transform .16s ease}
+.session-group-toggle.is-collapsed>svg{transform:rotate(-90deg)}
+.session-group-content-enter-active,.session-group-content-leave-active{overflow:hidden;transform-origin:top;transition:opacity .14s ease,transform .14s ease}
+.session-group-content-enter-from,.session-group-content-leave-to{opacity:0;transform:translateY(-3px)}
+@media(prefers-reduced-motion:reduce){.session-group-toggle,.session-group-toggle>svg,.session-group-content-enter-active,.session-group-content-leave-active{transition:none}}
 </style>

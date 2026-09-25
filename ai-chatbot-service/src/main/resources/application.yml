@@ -34,8 +34,12 @@ server:
   port: ${SERVER_PORT:8080}
 
 app:
+  widget:
+    # Leave empty to use the built-in product manual; set an ID to use a maintained product knowledge base.
+    knowledge-base-id: ${WIDGET_KNOWLEDGE_BASE_ID:}
   ai:
     call-timeout-seconds: ${AI_CALL_TIMEOUT_SECONDS:45}
+    tool-call-timeout-seconds: ${AI_TOOL_CALL_TIMEOUT_SECONDS:120}
   legacy:
     enabled: ${LEGACY_API_ENABLED:false}
   upload:
