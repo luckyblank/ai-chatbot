@@ -16,6 +16,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @Repository
 public class KnowledgeChunkRepository {
@@ -45,6 +46,9 @@ public class KnowledgeChunkRepository {
     public synchronized List<KnowledgeChunk> findByDocument(String documentId) {
         return chunks.values().stream().filter(chunk -> documentId.equals(chunk.getDocumentId()))
                 .sorted(Comparator.comparingInt(KnowledgeChunk::getSequence)).toList();
+    }
+    public synchronized Optional<KnowledgeChunk> findById(String chunkId) {
+        return Optional.ofNullable(chunks.get(chunkId));
     }
     public synchronized void deleteDocument(String documentId) {
         chunks.values().removeIf(chunk -> documentId.equals(chunk.getDocumentId())); persist();

@@ -6,6 +6,7 @@
         <p>从一个入口处理客户服务、内部支持与企业知识任务。</p>
       </div>
       <div class="heading-actions" aria-label="常用操作">
+        <RouterLink class="secondary" to="/#services"><CpuChipIcon /><span>运行环境</span></RouterLink>
         <RouterLink class="secondary" to="/knowledge-bases">
           <CircleStackIcon />
           <span>管理知识</span>
@@ -148,6 +149,7 @@
         </section>
       </aside>
     </div>
+    <WorkbenchServices :documents="metrics.readyDocuments" :loading="loading" :data-error="loadError" @refresh="loadDashboard" />
   </section>
 </template>
 
@@ -159,10 +161,12 @@ import {
   ArrowUpRightIcon,
   ChatBubbleLeftRightIcon,
   ChevronRightIcon,
-  CircleStackIcon
+  CircleStackIcon,
+  CpuChipIcon
 } from '@heroicons/vue/24/outline'
 import { scenarios } from '../data/scenarios'
 import { conversationAPI, knowledgeAPI } from '../services/api'
+import WorkbenchServices from '../components/WorkbenchServices.vue'
 
 const metrics = reactive({ knowledgeBases: null, readyDocuments: null, conversations: null })
 const knowledgeBases = ref([])

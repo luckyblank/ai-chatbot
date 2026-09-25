@@ -10,6 +10,7 @@ import {
 } from '@heroicons/vue/24/outline'
 import SidebarPanelIcon from './components/icons/SidebarPanelIcon.vue'
 import SupportWidget from './components/SupportWidget.vue'
+import AccountMenu from './components/AccountMenu.vue'
 import { mergeScenarios, scenarios } from './data/scenarios'
 import { authAPI, conversationAPI, knowledgeAPI, scenarioAPI, workflowAPI } from './services/api'
 import { authState, clearAuthenticatedUser } from './services/auth'
@@ -31,7 +32,6 @@ const searchInput = ref(null)
 const searchBody = ref(null)
 const dynamicSearchItems = ref([])
 const activeSearchIndex = ref(0)
-const profileMenuOpen = ref(false)
 const aiStatusDisplay = computed(() => describeAiStatus(aiStatusState.status, aiStatusState.loading))
 
 const navigation = [
@@ -39,8 +39,7 @@ const navigation = [
   { label: '会话中心', to: '/customer-service', icon: ChatBubbleLeftRightIcon },
   { label: '知识中心', to: '/knowledge-bases', icon: CircleStackIcon },
   { label: '场景配置', to: '/scenarios', icon: AdjustmentsHorizontalIcon },
-  { label: '工作流编排', to: '/workflows', icon: QueueListIcon },
-  { label: '系统管理', to: '/system', icon: Cog6ToothIcon }
+  { label: '工作流编排', to: '/workflows', icon: QueueListIcon }
 ]
 
 const searchResults = computed(() => {
@@ -139,7 +138,6 @@ watch(activeSearchIndex, async index => {
 })
 
 async function logout() {
-  profileMenuOpen.value = false
   try { await authAPI.logout() } finally {
     clearAuthenticatedUser(); await router.replace('/login')
   }
@@ -193,26 +191,7 @@ onBeforeUnmount(() => { window.removeEventListener('keydown', handleKeydown); wi
           <MagnifyingGlassIcon /><span>搜索会话、文档、场景与工作流</span><kbd>Ctrl K</kbd>
         </button>
         <div class="toolbar-actions">
-          <div class="profile-control">
-            <button class="profile-trigger" type="button" :aria-label="`账户菜单：${authState.user?.displayName || '当前用户'}`" :aria-expanded="profileMenuOpen" aria-haspopup="menu" @click="profileMenuOpen = !profileMenuOpen">
-              <UserCircleIcon />
-              <span><strong>{{ authState.user?.displayName || '当前用户' }}</strong><small>{{ authState.user?.role === 'ADMIN' ? '管理员' : '成员' }}</small></span>
-              <ChevronDownIcon class="profile-chevron" />
-            </button>
-            <div v-if="profileMenuOpen" class="profile-menu" role="menu">
-              <div class="profile-summary">
-                <UserCircleIcon />
-                <span><strong>{{ authState.user?.displayName || '当前用户' }}</strong><small>{{ authState.user?.username }} · {{ authState.user?.role === 'ADMIN' ? '管理员' : '成员' }}</small></span>
-              </div>
-              <button type="button" role="menuitem" @click="toggleDark(); profileMenuOpen = false">
-                <SunIcon v-if="isDark" /><MoonIcon v-else />
-                <span>{{ isDark ? '切换到浅色模式' : '切换到深色模式' }}</span>
-              </button>
-              <button class="logout-action" type="button" role="menuitem" @click="logout">
-                <ArrowLeftOnRectangleIcon /><span>退出登录</span>
-              </button>
-            </div>
-          </div>
+          <AccountMenu :user="authState.user" :dark="isDark" @toggle-theme="toggleDark()" @logout="logout" />
         </div>
       </header>
       <main class="route-stage"><RouterView /></main>
@@ -267,10 +246,10 @@ button,input,textarea,select { font: inherit; } button { cursor:pointer; }
 .service-summary{margin-top:auto;padding:13px;color:var(--sidebar-text);border:1px solid var(--sidebar-card-border);border-radius:9px;background:var(--sidebar-card);white-space:nowrap}.service-summary div{display:flex;align-items:center;gap:8px}.service-summary strong{font-size:13px}.service-summary small{display:block;margin:6px 0 0 15px;color:var(--sidebar-muted);font-size:12px}.configuration-dot{width:8px;height:8px;border-radius:50%;background:var(--primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--primary) 18%,transparent)}
 .configuration-dot--disabled,.configuration-dot--unknown{background:var(--sidebar-muted);box-shadow:0 0 0 3px color-mix(in srgb,var(--sidebar-muted) 18%,transparent)}.configuration-dot--missing{background:var(--warning);box-shadow:0 0 0 3px color-mix(in srgb,var(--warning) 18%,transparent)}
 .sidebar-collapsed .identity-copy,.sidebar-collapsed .primary-navigation span,.sidebar-collapsed .nav-caption,.sidebar-collapsed .service-summary{display:none}.sidebar-collapsed .product-identity{padding-inline:6px}.sidebar-collapsed .primary-navigation a{justify-content:center;padding:0}
-.application-stage{min-width:0;min-height:100vh}.global-toolbar{height:68px;position:sticky;top:0;z-index:30;display:grid;grid-template-columns:minmax(220px,1fr) minmax(300px,460px) minmax(180px,1fr);align-items:center;gap:24px;padding:0 26px 0 14px;background:color-mix(in srgb,var(--surface) 94%,transparent);border-bottom:1px solid var(--border-color);backdrop-filter:blur(14px)}.toolbar-leading,.toolbar-actions,.breadcrumb{display:flex;align-items:center}.toolbar-leading{min-width:0}.sidebar-control{width:34px;height:34px;display:grid;place-items:center;flex:none;margin-right:10px;color:var(--text-muted);background:transparent;border:1px solid transparent;border-radius:8px;transition:.15s}.sidebar-control:hover{color:var(--text-color);background:var(--surface-subtle);border-color:var(--border-color)}.sidebar-control svg{width:18px}.breadcrumb{min-width:0;gap:9px;color:var(--text-muted);font-size:14px;white-space:nowrap}.breadcrumb svg{width:14px;flex:none}.breadcrumb strong{overflow:hidden;color:var(--text-color);text-overflow:ellipsis}.global-search{min-height:40px;display:flex;align-items:center;gap:10px;padding:0 11px;color:var(--text-muted);background:var(--surface-subtle);border:1px solid var(--border-color);border-radius:9px;text-align:left}.global-search svg{width:18px}.global-search span{flex:1;font-size:13px}.global-search kbd{padding:3px 6px;color:var(--text-soft);background:var(--surface);border:1px solid var(--border-color);border-radius:5px;font-size:11px}.toolbar-actions{justify-content:flex-end}.profile-control{position:relative}.profile-trigger{min-height:42px;display:grid;grid-template-columns:28px auto 14px;align-items:center;gap:9px;padding:4px 8px;color:var(--text-color);background:transparent;border:1px solid transparent;border-radius:9px;text-align:left;transition:.15s}.profile-trigger:hover,.profile-trigger[aria-expanded='true']{background:var(--surface-subtle);border-color:var(--border-color)}.profile-trigger>svg:first-child{width:26px;color:var(--primary)}.profile-trigger span strong,.profile-trigger span small{display:block}.profile-trigger span strong{max-width:120px;overflow:hidden;font-size:13px;text-overflow:ellipsis;white-space:nowrap}.profile-trigger span small{margin-top:2px;color:var(--text-soft);font-size:11px}.profile-chevron{width:14px;color:var(--text-soft);transition:transform .15s}.profile-trigger[aria-expanded='true'] .profile-chevron{transform:rotate(180deg)}.profile-menu{position:absolute;top:calc(100% + 9px);right:0;width:232px;padding:8px;background:var(--surface);border:1px solid var(--border-color);border-radius:11px;box-shadow:var(--shadow-float)}.profile-summary{display:flex;gap:10px;align-items:center;margin:0 4px 6px;padding:8px 6px 12px;border-bottom:1px solid var(--border-color)}.profile-summary>svg{width:30px;flex:none;color:var(--primary)}.profile-summary strong,.profile-summary small{display:block}.profile-summary strong{font-size:13px}.profile-summary small{margin-top:4px;color:var(--text-soft);font-size:11px}.profile-menu>button{width:100%;min-height:38px;display:flex;align-items:center;gap:10px;padding:0 10px;color:var(--text-muted);background:transparent;border:0;border-radius:7px;text-align:left}.profile-menu>button:hover{color:var(--text-color);background:var(--surface-subtle)}.profile-menu>button svg{width:18px}.profile-menu>button span{font-size:13px}.profile-menu>button.logout-action{color:var(--danger)}.route-stage{min-height:calc(100vh - 68px)}
+.application-stage{min-width:0;min-height:100vh}.global-toolbar{height:68px;position:sticky;top:0;z-index:30;display:grid;grid-template-columns:minmax(220px,1fr) minmax(300px,460px) minmax(180px,1fr);align-items:center;gap:24px;padding:0 26px 0 14px;background:color-mix(in srgb,var(--surface) 94%,transparent);border-bottom:1px solid var(--border-color);backdrop-filter:blur(14px)}.toolbar-leading,.toolbar-actions,.breadcrumb{display:flex;align-items:center}.toolbar-leading{min-width:0}.sidebar-control{width:34px;height:34px;display:grid;place-items:center;flex:none;margin-right:10px;color:var(--text-muted);background:transparent;border:1px solid transparent;border-radius:8px;transition:.15s}.sidebar-control:hover{color:var(--text-color);background:var(--surface-subtle);border-color:var(--border-color)}.sidebar-control svg{width:18px}.breadcrumb{min-width:0;gap:9px;color:var(--text-muted);font-size:14px;white-space:nowrap}.breadcrumb svg{width:14px;flex:none}.breadcrumb strong{overflow:hidden;color:var(--text-color);text-overflow:ellipsis}.global-search{min-height:40px;display:flex;align-items:center;gap:10px;padding:0 11px;color:var(--text-muted);background:var(--surface-subtle);border:1px solid var(--border-color);border-radius:9px;text-align:left}.global-search svg{width:18px}.global-search span{flex:1;font-size:13px}.global-search kbd{padding:3px 6px;color:var(--text-soft);background:var(--surface);border:1px solid var(--border-color);border-radius:5px;font-size:11px}.toolbar-actions{justify-content:flex-end}.route-stage{min-height:calc(100vh - 68px)}
 .search-backdrop{position:fixed;inset:0;z-index:200;display:grid;place-items:start center;padding-top:10vh;background:rgba(10,16,27,.52);backdrop-filter:blur(5px)}.search-dialog{width:min(720px,calc(100vw - 36px));overflow:hidden;background:var(--surface);border:1px solid var(--border-color);border-radius:14px;box-shadow:var(--shadow-float)}.search-dialog>header{height:58px;display:grid;grid-template-columns:22px 1fr 34px;align-items:center;gap:11px;padding:0 16px;border-bottom:1px solid var(--border-color)}.search-dialog>header svg{width:21px;color:var(--text-muted)}.search-dialog input{width:100%;height:100%;color:var(--text-color);background:transparent;border:0;outline:0;font-size:16px}.search-dialog header button{height:32px;display:grid;place-items:center;color:var(--text-muted);background:transparent;border:0}.search-body{max-height:56vh;overflow:auto;padding:9px}.search-result{width:100%;display:grid;grid-template-columns:58px 1fr 18px;align-items:center;gap:12px;padding:12px;color:var(--text-color);background:transparent;border:0;border-radius:9px;text-align:left}.search-result:hover,.search-result.active{background:var(--primary-soft)}.search-result:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}.result-type{padding:4px 6px;color:var(--primary);background:var(--primary-soft);border-radius:5px;font-size:11px;text-align:center}.search-result strong,.search-result small{display:block}.search-result strong{font-size:14px}.search-result small{margin-top:4px;color:var(--text-muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.search-result>svg{width:16px;color:var(--text-soft)}.search-state{padding:50px 20px;color:var(--text-muted);text-align:center}.search-warning{margin:2px 4px 8px;padding:9px 11px;color:var(--warning);background:color-mix(in srgb,var(--warning) 9%,var(--surface));border-radius:7px;font-size:12px;line-height:1.5}.search-dialog>footer{display:flex;gap:18px;padding:10px 16px;color:var(--text-soft);background:var(--surface-subtle);font-size:11px}
 @media(min-width:1600px){.enterprise-shell{grid-template-columns:270px minmax(0,1fr)}.enterprise-shell.sidebar-collapsed{grid-template-columns:82px minmax(0,1fr)}.global-toolbar{height:72px}.route-stage{min-height:calc(100vh - 72px)}}
-@media(max-width:1100px){.global-toolbar{grid-template-columns:minmax(210px,1fr) minmax(260px,380px) auto;gap:16px}.profile-trigger span,.profile-trigger .profile-chevron{display:none}.profile-trigger{grid-template-columns:28px;padding-inline:6px}}
+@media(max-width:1100px){.global-toolbar{grid-template-columns:minmax(210px,1fr) minmax(260px,380px) auto;gap:16px}}
 @media(max-width:860px){.enterprise-shell,.enterprise-shell.sidebar-collapsed{grid-template-columns:1fr;padding-bottom:calc(64px + env(safe-area-inset-bottom))}.product-sidebar{width:100%;height:calc(64px + env(safe-area-inset-bottom));position:fixed;top:auto;bottom:0;z-index:50;display:block;padding:7px 10px calc(7px + env(safe-area-inset-bottom))}.product-identity,.nav-caption,.service-summary{display:none}.primary-navigation{height:50px;flex-direction:row;justify-content:space-around;margin:0}.primary-navigation a,.sidebar-collapsed .primary-navigation a{min-height:50px;flex:1;flex-direction:column;justify-content:center;gap:2px;padding:0}.primary-navigation a.router-link-exact-active,.primary-navigation a.router-link-active:not([href='/']){box-shadow:none}.primary-navigation svg{width:19px}.primary-navigation span,.sidebar-collapsed .primary-navigation span{display:block;font-size:10px}.global-toolbar{grid-template-columns:minmax(0,1fr) 40px auto;gap:8px;padding:0 14px}.global-search{width:40px;min-height:40px;justify-content:center;padding:0}.global-search span,.global-search kbd,.sidebar-control{display:none}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition-duration:.01ms!important;animation-duration:.01ms!important}}
 </style>

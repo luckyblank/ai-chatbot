@@ -35,12 +35,15 @@ test('AI status request uses the authenticated same-origin API', async () => {
   }
 })
 
-test('sidebar and system page use the server-backed status instead of a fixed configured label', async () => {
+test('sidebar and workbench services use the server-backed status after merging system management', async () => {
   const sidebar = await readFile(new URL('../src/App.vue', import.meta.url), 'utf8')
-  const systemPage = await readFile(new URL('../src/views/SystemOverview.vue', import.meta.url), 'utf8')
+  const systemPage = await readFile(new URL('../src/components/WorkbenchServices.vue', import.meta.url), 'utf8')
   assert.match(sidebar, /\{\{ aiStatusDisplay\.title \}\}/)
-  assert.match(systemPage, /\{\{ aiStatusDisplay\.badge \}\}/)
-  assert.equal((systemPage.match(/\{\{ aiStatusDisplay\.badge \}\}/g) || []).length, 2)
+  assert.match(systemPage, /\{\{ ai\.badge \}\}/)
+  assert.match(systemPage, /describeAiStatus\(aiStatusState\.status/)
+  const router = await readFile(new URL('../src/router/index.js', import.meta.url), 'utf8')
+  assert.match(router, /path: '\/system'.*redirect: \{ path: '\/', hash: '#services' \}/)
+  assert.doesNotMatch(sidebar, /label: '系统管理'/)
   assert.doesNotMatch(sidebar, />AI 服务已配置</)
   assert.doesNotMatch(systemPage, /<label>模型服务<\/label><strong>qwen-plus<\/strong>/)
 })

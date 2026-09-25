@@ -14,6 +14,7 @@ import {
   XMarkIcon
 } from '@heroicons/vue/24/outline'
 import PendingActionCard from './PendingActionCard.vue'
+import CitationSources from './CitationSources.vue'
 import { BASE_URL, conversationAPI, createRequestId, pendingActionAPI } from '../services/api'
 import { authState } from '../services/auth'
 
@@ -34,6 +35,7 @@ const actionErrors = reactive({})
 const draft = ref('')
 const attachments = ref([])
 const sending = ref(false)
+const generating = ref(false)
 const uploadingAttachments = ref(false)
 const initialized = ref(false)
 const loadingSession = ref(false)
@@ -41,6 +43,9 @@ const recentSessions = ref([])
 const loadingHistory = ref(false)
 const historyError = ref('')
 const notice = ref('')
+const assistantContext = ref(null)
+const assistantContextLoading = ref(false)
+const assistantContextError = ref('')
 const panel = ref(null)
 const launcher = ref(null)
 const messageArea = ref(null)
@@ -53,7 +58,7 @@ const draggingPanel = ref(false)
 const draggingLauncher = ref(false)
 const panelManuallyDragged = ref(false)
 
-const conversationStorageKey = computed(() => 'enterprise-support-conversation:' + (authState.user?.username || ''))
+const conversationStorageKey = computed(() => 'enterprise-product-assistant-conversation:' + (authState.user?.username || ''))
 const launcherStorageKey = computed(() => 'enterprise-support-launcher:' + (authState.user?.username || ''))
 const panelStyle = computed(() => !isFullscreen.value && panelPosition.value
   ? { left: panelPosition.value.left + 'px', top: panelPosition.value.top + 'px', right: 'auto', bottom: 'auto' }
@@ -61,7 +66,11 @@ const panelStyle = computed(() => !isFullscreen.value && panelPosition.value
 const launcherStyle = computed(() => launcherPosition.value
   ? { left: launcherPosition.value.left + 'px', top: launcherPosition.value.top + 'px', right: 'auto', bottom: 'auto' }
   : undefined)
-const supportSessions = computed(() => recentSessions.value.filter(item => item.scenarioCode === 'commerce-support').slice(0, 8))
+const supportSessions = computed(() => recentSessions.value.filter(item =>
+  item.scenarioCode === 'knowledge-research'
+    && item.knowledgeBaseId === assistantContext.value?.knowledgeBaseId
+).slice(0, 8))
+const assistantReady = computed(() => assistantContext.value?.available === true)
 
 let panelDrag = null
 let launcherDrag = null
@@ -69,6 +78,7 @@ let launcherAnchor = null
 let launcherSize = { width: 54, height: 54 }
 let suppressLauncherClick = false
 let activeStreamController = null
+const manuallyStoppedStreams = new WeakSet()
 let scrollQueued = false
 let sessionLoadVersion = 0
 let pendingActionPollTimer = 0
@@ -170,6 +180,8 @@ function onAttachmentDrop(event) {
 
 watch(() => authState.user?.username, username => {
   clearAttachments()
+  assistantContext.value = null
+  assistantContextError.value = ''
   sessionLoadVersion += 1
   resetPendingActionState()
   if (!username) {
@@ -449,6 +461,14 @@ async function restoreSession() {
   try {
     const session = await conversationAPI.get(requestedId)
     if (requestVersion !== sessionLoadVersion || currentConversationId.value !== requestedId) return
+    if (session.scenarioCode !== 'knowledge-research'
+        || (assistantContext.value?.knowledgeBaseId
+          && session.knowledgeBaseId !== assistantContext.value.knowledgeBaseId)) {
+      setConversationId('')
+      messages.value = []
+      initialized.value = true
+      return
+    }
     messages.value = session.messages || []
     mergePendingActions(session.pendingActions)
     initialized.value = true
@@ -472,6 +492,19 @@ async function restoreSession() {
   }
 }
 
+async function loadAssistantContext() {
+  assistantContextLoading.value = true
+  assistantContextError.value = ''
+  try {
+    assistantContext.value = await conversationAPI.widgetContext()
+  } catch (error) {
+    assistantContext.value = null
+    assistantContextError.value = error.message || '暂时无法读取产品知识状态'
+  } finally {
+    assistantContextLoading.value = false
+  }
+}
+
 async function openWidget() {
   if (launcher.value) launcherSize = { width: launcher.value.offsetWidth, height: launcher.value.offsetHeight }
   launcherAnchor = launcher.value?.getBoundingClientRect() || null
@@ -480,6 +513,7 @@ async function openWidget() {
   showHistory.value = false
   await nextTick()
   placePanel()
+  await loadAssistantContext()
   if (!initialized.value) await restoreSession()
   void loadHistory()
   if (!open.value) return
@@ -584,6 +618,7 @@ async function streamAnswer(conversationId, content, attachmentIds, assistant, r
   const requestId = retry?.requestId || assistant.requestId || createRequestId()
   assistant.requestId = requestId
   activeStreamController = controller
+  generating.value = true
   let completed = false
   try {
     const result = await conversationAPI.sendStream(conversationId, content, attachmentIds, {
@@ -611,31 +646,41 @@ async function streamAnswer(conversationId, content, attachmentIds, assistant, r
     void loadHistory()
     return true
   } catch (error) {
-    if (completed || error.name === 'AbortError') return completed
+    if (completed) return true
     assistant.streaming = false
     assistant.interrupted = true
-    assistant.interruptionMessage = error.message || '连接已断开'
+    assistant.interruptionMessage = manuallyStoppedStreams.has(controller)
+      ? '已手动停止'
+      : error.message || '连接已断开'
     assistant.retry = retry
     scrollToBottom()
     return false
   } finally {
     if (activeStreamController === controller) activeStreamController = null
+    generating.value = false
     await refreshPendingActions(conversationId, true)
   }
 }
 
+function stopGeneration() {
+  const controller = activeStreamController
+  if (!controller || controller.signal.aborted || !generating.value) return
+  manuallyStoppedStreams.add(controller)
+  controller.abort()
+}
+
 async function sendMessage() {
   const content = draft.value.trim()
-  if (!content || sending.value || loadingSession.value || (!initialized.value && currentConversationId.value)) return
+  if (!content || !assistantReady.value || sending.value || loadingSession.value || (!initialized.value && currentConversationId.value)) return
   if (messages.value.some(item => item.interrupted)) {
-    notice.value = '请先重试中断的回答，或新建咨询。'
+    notice.value = '请先重试或同步中断的回答，再发送新问题。'
     return
   }
   sending.value = true
   notice.value = ''
   try {
     if (!currentConversationId.value) {
-      const session = await conversationAPI.create(null, '在线客服 · 新对话', 'commerce-support')
+      const session = await conversationAPI.createWidget()
       setConversationId(session.id)
       initialized.value = true
     }
@@ -691,6 +736,24 @@ async function retryInterruptedAnswer() {
     await streamAnswer(currentConversationId.value, retry.content, retry.attachmentIds || [], assistant, retry)
   } catch (error) {
     notice.value = '重试前核对会话失败：' + (error.message || '请稍后重试')
+  } finally {
+    sending.value = false
+  }
+}
+
+async function discardInterruptedAnswer() {
+  if (sending.value || !currentConversationId.value) return
+  sending.value = true
+  try {
+    const session = await conversationAPI.get(currentConversationId.value)
+    messages.value = session.messages || []
+    mergePendingActions(session.pendingActions)
+    await refreshPendingActions(currentConversationId.value, true)
+    notice.value = '已同步服务端会话记录，可以继续提问。'
+    await nextTick()
+    scrollToBottom()
+  } catch (error) {
+    notice.value = '会话同步失败：' + (error.message || '请稍后重试')
   } finally {
     sending.value = false
   }
@@ -809,14 +872,14 @@ onBeforeUnmount(() => {
         :class="{ 'is-dragging': draggingPanel, 'is-conversation-page': props.conversationPage, 'is-fullscreen': isFullscreen }"
         :style="panelStyle"
         role="dialog"
-        aria-label="AI 在线客服"
+        aria-label="产品使用助手"
         aria-modal="false"
       >
         <header
           class="support-widget-header"
-          :title="isFullscreen ? '客服窗口已全屏' : '按住标题栏可拖动窗口，方向键也可移动'"
+          :title="isFullscreen ? '助手窗口已全屏' : '按住标题栏可拖动窗口，方向键也可移动'"
           :tabindex="isFullscreen ? -1 : 0"
-          :aria-label="isFullscreen ? 'AI 在线客服标题栏' : 'AI 在线客服标题栏，可拖动；方向键可移动窗口'"
+          :aria-label="isFullscreen ? '产品使用助手标题栏' : '产品使用助手标题栏，可拖动；方向键可移动窗口'"
           @pointerdown="startPanelDrag"
           @pointermove="dragPanel"
           @pointerup="stopPanelDrag"
@@ -825,21 +888,27 @@ onBeforeUnmount(() => {
         >
           <div class="support-widget-identity">
             <span class="support-widget-avatar"><SparklesIcon /></span>
-            <span><strong>AI 在线客服</strong><small>智能助理为你解答</small></span>
+            <span><strong>产品使用助手</strong><small>基于产品知识解答</small></span>
           </div>
           <div class="support-widget-actions">
-            <button type="button" :title="isFullscreen ? '退出全屏' : '全屏'" :aria-label="isFullscreen ? '退出客服全屏' : '将客服窗口全屏'" @click="toggleFullscreen"><ArrowsPointingInIcon v-if="isFullscreen" /><ArrowsPointingOutIcon v-else /></button>
+            <button type="button" :title="isFullscreen ? '退出全屏' : '全屏'" :aria-label="isFullscreen ? '退出助手全屏' : '将助手窗口全屏'" @click="toggleFullscreen"><ArrowsPointingInIcon v-if="isFullscreen" /><ArrowsPointingOutIcon v-else /></button>
             <button type="button" :aria-label="showHistory ? '返回聊天' : '查看最近咨询'" :title="showHistory ? '返回聊天' : '最近咨询'" @click="toggleHistory"><ChatBubbleLeftRightIcon v-if="showHistory" /><ClockIcon v-else /></button>
             <button type="button" aria-label="新建咨询" title="新建咨询" :disabled="sending" @click="newConversation"><PlusIcon /></button>
-            <button type="button" class="support-widget-close" aria-label="关闭客服窗口" title="关闭" @click="closeWidget(true)"><XMarkIcon /></button>
+            <button type="button" class="support-widget-close" aria-label="关闭助手窗口" title="关闭" @click="closeWidget(true)"><XMarkIcon /></button>
           </div>
         </header>
+
+        <div v-if="!showHistory" class="support-widget-context" aria-live="polite">
+          <span v-if="assistantContextLoading">正在检查产品知识…</span>
+          <span v-else-if="assistantReady">知识范围：{{ assistantContext.knowledgeBaseName }} · 文档已索引</span>
+          <span v-else>{{ assistantContextError || assistantContext?.message || '产品知识问答暂不可用' }}</span>
+        </div>
 
         <div v-if="showHistory" class="support-widget-history">
           <div class="support-widget-section-heading"><strong>最近咨询</strong><span>选择会话继续提问</span></div>
           <p v-if="loadingHistory" class="support-widget-state">正在加载…</p>
           <div v-else-if="historyError" class="support-widget-state support-widget-error">{{ historyError }}<button type="button" @click="loadHistory">重新加载</button></div>
-          <p v-else-if="!supportSessions.length" class="support-widget-state">暂无客服咨询记录</p>
+          <p v-else-if="!supportSessions.length" class="support-widget-state">暂无产品咨询记录</p>
           <template v-else>
             <button
               v-for="session in supportSessions"
@@ -857,17 +926,20 @@ onBeforeUnmount(() => {
           <button type="button" class="support-widget-new-from-history" @click="newConversation"><PlusIcon />发起新咨询</button>
         </div>
 
-        <div v-else ref="messageArea" class="support-widget-messages" role="log" aria-label="客服对话记录">
+        <div v-else ref="messageArea" class="support-widget-messages" role="log" aria-label="产品助手对话记录">
           <p v-if="loadingSession" class="support-widget-state">正在恢复上次咨询…</p>
           <div v-else-if="!messages.length" class="support-widget-welcome">
             <span class="support-widget-welcome-icon"><SparklesIcon /></span>
-            <p class="support-widget-eyebrow">智能客服 · 售后服务</p>
+            <p class="support-widget-eyebrow">企业智能服务中心 · 产品使用</p>
             <h2>你好，有什么可以帮你？</h2>
-            <p>可直接描述订单、物流、退换货等问题，我会在这里回复你。</p>
-            <div class="support-widget-prompts">
-              <button type="button" @click="usePrompt('帮我查询订单进度')">查询订单进度</button>
-              <button type="button" @click="usePrompt('退换货需要满足什么条件？')">了解退换货政策</button>
+            <p>可以询问知识中心、业务场景和工作台的使用方法。</p>
+            <p v-if="assistantContextError" class="support-widget-knowledge-state">{{ assistantContextError }} <button type="button" @click="loadAssistantContext">重新检查连接</button></p>
+            <p v-else-if="!assistantContextLoading && !assistantReady" class="support-widget-knowledge-state">{{ assistantContext?.message || '暂时无法使用产品知识问答。' }} <RouterLink to="/knowledge-bases">查看知识中心</RouterLink></p>
+            <div v-if="assistantReady" class="support-widget-prompts">
+              <button type="button" @click="usePrompt('知识中心支持上传哪些文件格式？')">知识中心能上传什么？</button>
+              <button type="button" @click="usePrompt('文档显示 PENDING_AI 时应该怎么办？')">文档为什么待索引？</button>
             </div>
+            <RouterLink class="support-widget-business-link" :to="{ path: '/customer-service', query: { scenario: 'commerce-support' } }" @click="closeWidget()">需要处理订单或售后？前往业务会话</RouterLink>
           </div>
           <article v-for="(message, index) in messages" :key="index" class="support-widget-message" :class="message.role">
             <span v-if="message.role !== 'user'" class="support-widget-message-avatar"><SparklesIcon /></span>
@@ -878,12 +950,13 @@ onBeforeUnmount(() => {
                   <ChatMarkdown v-if="message.content" :content="message.content" :streaming="Boolean(message.streaming)" />
                   <span v-if="message.streaming && !message.content" class="support-widget-typing" aria-label="正在生成回答"><i></i><i></i><i></i></span>
                   <div v-if="message.interrupted" class="support-widget-interruption" role="alert">
-                    <span>回答中断：{{ message.interruptionMessage }}</span>
+                    <span>{{ message.interruptionMessage === '已手动停止' ? '已停止生成，可重试或同步会话' : `回答中断：${message.interruptionMessage}` }}</span>
                     <button type="button" :disabled="sending" @click="retryInterruptedAnswer"><ArrowPathIcon />重试回答</button>
+                    <button type="button" :disabled="sending" @click="discardInterruptedAnswer">同步并继续</button>
                   </div>
                   <details v-if="message.citations?.length" class="support-widget-citations">
                     <summary>参考来源 · {{ message.citations.length }}</summary>
-                    <p v-for="(citation, citationIndex) in message.citations" :key="citationIndex">{{ citation.fileName }}<span v-if="citation.pageNumber"> · 第 {{ citation.pageNumber }} 页</span></p>
+                    <CitationSources :citations="message.citations" compact :show-heading="false" />
                   </details>
                 </template>
                 <div v-if="message.attachments?.length" class="support-widget-message-attachments">
@@ -919,7 +992,7 @@ onBeforeUnmount(() => {
 
         <form v-if="!showHistory" class="support-widget-composer" :class="{ 'is-drag-over': draggingFiles }" @submit.prevent="sendMessage" @dragenter="onAttachmentDragEnter" @dragover="onAttachmentDragOver" @dragleave="onAttachmentDragLeave" @drop="onAttachmentDrop">
           <label class="support-widget-input-label" for="support-widget-input">输入咨询内容</label>
-          <input ref="fileInput" class="support-widget-file-input" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md,.markdown" :disabled="sending" @change="selectAttachments">
+          <input ref="fileInput" class="support-widget-file-input" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md,.markdown" :disabled="!assistantReady || sending" @change="selectAttachments">
           <div v-if="attachments.length" class="support-widget-attachment-tray" aria-label="待发送附件">
             <div v-for="(file, index) in attachments" :key="file.name + index" class="support-widget-attachment-chip">
               <img v-if="file.isImage" :src="file.url" :alt="file.name">
@@ -929,18 +1002,19 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <div class="support-widget-compose-row">
-            <button class="support-widget-attach-button" type="button" title="添加附件" aria-label="添加附件" :disabled="sending" @click="fileInput?.click()"><PaperClipIcon /></button>
+            <button class="support-widget-attach-button" type="button" title="添加附件" aria-label="添加附件" :disabled="!assistantReady || sending" @click="fileInput?.click()"><PaperClipIcon /></button>
             <textarea
               id="support-widget-input"
               ref="composer"
               v-model="draft"
               rows="2"
               placeholder="请输入你的问题…"
-              :disabled="sending || loadingSession || (!initialized && Boolean(currentConversationId))"
+              :disabled="!assistantReady || sending || loadingSession || (!initialized && Boolean(currentConversationId))"
               @keydown.enter.exact="handleComposerEnter"
               @paste="onAttachmentPaste"
             ></textarea>
-            <button class="support-widget-send-button" type="submit" title="发送消息" aria-label="发送消息" :disabled="!draft.trim() || sending || loadingSession || (!initialized && Boolean(currentConversationId))"><PaperAirplaneIcon /></button>
+            <button v-if="generating" class="support-widget-stop-button" type="button" title="停止生成" aria-label="停止生成" @click="stopGeneration">停止</button>
+            <button v-else class="support-widget-send-button" type="submit" title="发送消息" aria-label="发送消息" :disabled="!assistantReady || !draft.trim() || sending || loadingSession || (!initialized && Boolean(currentConversationId))"><PaperAirplaneIcon /></button>
           </div>
           <small class="support-widget-composer-hint">{{ uploadingAttachments ? '正在上传附件…' : attachments.length && !draft.trim() ? '输入问题后发送附件' : 'Enter 发送 · Shift + Enter 换行' }}</small>
           <div v-if="draggingFiles" class="support-widget-drop-hint" aria-hidden="true">松开以添加附件</div>
@@ -957,8 +1031,8 @@ onBeforeUnmount(() => {
       :style="launcherStyle"
       aria-controls="support-widget-panel"
       :aria-expanded="false"
-      aria-label="打开 AI 在线客服"
-      title="AI 在线客服（可拖动）"
+      aria-label="打开产品使用助手"
+      title="产品使用助手（可拖动）"
       @pointerdown="startLauncherDrag"
       @pointermove="dragLauncher"
       @pointerup="stopLauncherDrag"
@@ -966,7 +1040,7 @@ onBeforeUnmount(() => {
       @click="handleLauncherClick"
     >
       <ChatBubbleLeftRightIcon />
-      <span>在线客服</span>
+      <span>使用助手</span>
     </button>
   </div>
 </template>
@@ -1028,6 +1102,12 @@ onBeforeUnmount(() => {
 .support-widget-prompts { display: flex; flex-wrap: wrap; gap: 8px; }
 .support-widget-prompts button { min-height: 33px; padding: 5px 10px; color: var(--primary); background: var(--primary-soft); border: 1px solid color-mix(in srgb, var(--primary) 18%, var(--border-color)); border-radius: 999px; font-size: 11px; }
 .support-widget-prompts button:hover { border-color: var(--primary); }
+.support-widget-context { padding: 7px 19px; color: var(--text-muted); background: var(--surface); border-bottom: 1px solid var(--border-color); font-size: 10px; line-height: 1.35; }
+.support-widget-context span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.support-widget-knowledge-state { margin: 0 0 14px; color: var(--text-muted); font-size: 11px; line-height: 1.55; }
+.support-widget-knowledge-state button, .support-widget-knowledge-state a, .support-widget-business-link { color: var(--primary); font: inherit; }
+.support-widget-knowledge-state button { padding: 0; border: 0; background: none; cursor: pointer; }
+.support-widget-business-link { display: inline-block; margin-top: 15px; font-size: 11px; text-decoration: none; }
 .support-widget-message { display: flex; align-items: flex-end; gap: 7px; margin-bottom: 15px; }
 .support-widget-message.user { justify-content: flex-end; }
 .support-widget-message-avatar { width: 25px; height: 25px; display: grid; place-items: center; flex: none; color: var(--primary); background: var(--primary-soft); border-radius: 8px; }
@@ -1114,6 +1194,8 @@ onBeforeUnmount(() => {
 .support-widget-compose-row .support-widget-attach-button:hover:not(:disabled) { color: var(--primary); border-color: color-mix(in srgb, var(--primary) 35%, var(--border-color)); }
 .support-widget-compose-row .support-widget-send-button { color: #fff; background: #315efb; border: 0; }
 .support-widget-compose-row .support-widget-send-button:hover:not(:disabled) { background: #244bd8; }
+.support-widget-compose-row .support-widget-stop-button { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--surface)); border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--border-color)); font-size: 11px; font-weight: 700; }
+.support-widget-compose-row .support-widget-stop-button:hover { background: color-mix(in srgb, var(--danger) 17%, var(--surface)); }
 .support-widget-compose-row button:disabled { opacity: .45; cursor: not-allowed; }
 .support-widget-compose-row button svg { width: 18px; height: 18px; }
 .support-widget-composer > .support-widget-composer-hint { display: block; margin: 6px 2px 0; color: var(--text-soft); font-size: 10px; }

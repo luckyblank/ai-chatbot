@@ -3,6 +3,7 @@ import { ensureAuth } from '../services/auth'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
+  scrollBehavior(to) { return to.hash ? { el: to.hash, top: 86 } : { top: 0 } },
   routes: [
     { path: '/login', name: 'login', meta: { title: '登录', public: true }, component: () => import('../views/Login.vue') },
     { path: '/', name: 'home', meta: { title: '智能工作台' }, component: () => import('../views/Home.vue') },
@@ -12,7 +13,7 @@ const router = createRouter({
     { path: '/workflows/new/design', name: 'workflow-designer-new', meta: { title: '新建工作流', fullscreen: true }, component: () => import('../views/WorkflowDesigner.vue') },
     { path: '/workflows/:id/design', name: 'workflow-designer', meta: { title: '工作流设计器', fullscreen: true }, component: () => import('../views/WorkflowDesigner.vue') },
     { path: '/workflows', name: 'workflows', meta: { title: '工作流编排' }, component: () => import('../views/WorkflowCenter.vue') },
-    { path: '/system', name: 'system', meta: { title: '系统管理' }, component: () => import('../views/SystemOverview.vue') },
+    { path: '/system', name: 'system', redirect: { path: '/', hash: '#services' } },
     { path: '/:pathMatch(.*)*', redirect: '/' }
   ]
 })

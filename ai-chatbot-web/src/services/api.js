@@ -177,6 +177,8 @@ export const knowledgeAPI = {
 }
 
 export const conversationAPI = {
+  widgetContext: () => request('/api/v1/conversations/widget/context'),
+  createWidget: () => request('/api/v1/conversations/widget/conversations', { method: 'POST' }),
   list(knowledgeBaseId) {
     const query = knowledgeBaseId ? `?knowledgeBaseId=${encodeURIComponent(knowledgeBaseId)}` : ''
     return request(`/api/v1/conversations${query}`)

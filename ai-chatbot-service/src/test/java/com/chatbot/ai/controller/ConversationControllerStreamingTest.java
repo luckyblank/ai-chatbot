@@ -83,6 +83,8 @@ class ConversationControllerStreamingTest {
                 knowledgeChatService,
                 attachmentService,
                 mock(ConversationTitleService.class),
+                mock(com.chatbot.ai.service.WidgetAssistantService.class),
+                mock(com.chatbot.ai.repository.KnowledgeChunkRepository.class),
                 chatMemory);
         mockMvc = MockMvcBuilders.standaloneSetup(controller)
                 .setControllerAdvice(new ApiExceptionHandler())

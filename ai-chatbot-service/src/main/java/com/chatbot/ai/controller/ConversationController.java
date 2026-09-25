@@ -1,6 +1,7 @@
 package com.chatbot.ai.controller;
 
 import com.chatbot.ai.domain.chat.ChatMessageEntry;
+import com.chatbot.ai.domain.chat.ChatCitation;
 import com.chatbot.ai.domain.chat.ConversationSession;
 import com.chatbot.ai.domain.auth.AuthenticatedUser;
 import com.chatbot.ai.domain.vo.ChatAnswer;
@@ -10,10 +11,12 @@ import com.chatbot.ai.domain.vo.SendMessageRequest;
 import com.chatbot.ai.domain.vo.RenameConversationRequest;
 import com.chatbot.ai.domain.chat.ChatAttachment;
 import com.chatbot.ai.repository.ConversationRepository;
+import com.chatbot.ai.repository.KnowledgeChunkRepository;
 import com.chatbot.ai.service.KnowledgeBaseService;
 import com.chatbot.ai.service.KnowledgeChatService;
 import com.chatbot.ai.service.AttachmentService;
 import com.chatbot.ai.service.ConversationTitleService;
+import com.chatbot.ai.service.WidgetAssistantService;
 import com.chatbot.ai.security.AuthInterceptor;
 import jakarta.validation.Valid;
 import jakarta.servlet.http.HttpServletRequest;
@@ -50,6 +53,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Schedulers;
@@ -65,6 +69,8 @@ public class ConversationController {
     private final KnowledgeChatService knowledgeChatService;
     private final AttachmentService attachmentService;
     private final ConversationTitleService conversationTitleService;
+    private final WidgetAssistantService widgetAssistantService;
+    private final KnowledgeChunkRepository chunkRepository;
     private final ChatMemory chatMemory;
 
     @GetMapping
@@ -79,14 +85,69 @@ public class ConversationController {
 
     @GetMapping("/{conversationId}")
     public ConversationSession get(@PathVariable String conversationId, HttpServletRequest request) {
-        return requireOwnedConversation(conversationId, requireActor(request));
+        return withFullCitationExcerpts(requireOwnedConversation(conversationId, requireActor(request)));
+    }
+
+    private ConversationSession withFullCitationExcerpts(ConversationSession session) {
+        if (session.getKnowledgeBaseId() == null || session.getMessages() == null) return session;
+        List<ChatMessageEntry> messages = session.getMessages().stream().map(message -> {
+            if (message.getCitations() == null || message.getCitations().isEmpty()) return message;
+            List<ChatCitation> citations = message.getCitations().stream()
+                    .map(citation -> withFullCitationExcerpt(session.getKnowledgeBaseId(), citation)).toList();
+            return ChatMessageEntry.builder()
+                    .requestId(message.getRequestId()).role(message.getRole())
+                    .content(message.getContent()).createdAt(message.getCreatedAt())
+                    .attachments(message.getAttachments()).citations(citations)
+                    .traces(message.getTraces()).build();
+        }).toList();
+        return ConversationSession.builder()
+                .id(session.getId()).ownerId(session.getOwnerId())
+                .knowledgeBaseId(session.getKnowledgeBaseId()).scenarioCode(session.getScenarioCode())
+                .title(session.getTitle()).titleCustomized(session.isTitleCustomized())
+                .createdAt(session.getCreatedAt()).updatedAt(session.getUpdatedAt())
+                .messages(messages).build();
+    }
+
+    private ChatCitation withFullCitationExcerpt(String knowledgeBaseId, ChatCitation citation) {
+        if (citation == null || citation.getChunkId() == null || citation.getChunkId().isBlank()
+                || citation.getDocumentId() == null || citation.getDocumentId().isBlank()) return citation;
+        return chunkRepository.findById(citation.getChunkId())
+                .filter(chunk -> knowledgeBaseId.equals(chunk.getKnowledgeBaseId()))
+                .filter(chunk -> Objects.equals(chunk.getDocumentId(), citation.getDocumentId()))
+                .filter(chunk -> chunk.getContent() != null)
+                .map(chunk -> ChatCitation.builder()
+                        .documentId(citation.getDocumentId()).chunkId(citation.getChunkId())
+                        .fileName(citation.getFileName()).pageNumber(citation.getPageNumber())
+                        .excerpt(chunk.getContent().trim()).build())
+                .orElse(citation);
+    }
+
+    @GetMapping("/widget/context")
+    public WidgetAssistantService.Context widgetContext(HttpServletRequest request) {
+        requireActor(request);
+        return widgetAssistantService.context();
+    }
+
+    @PostMapping("/widget/conversations")
+    @ResponseStatus(HttpStatus.CREATED)
+    public ConversationSession createWidgetConversation(HttpServletRequest request) {
+        AuthenticatedUser actor = requireActor(request);
+        WidgetAssistantService.Context context = widgetAssistantService.context();
+        if (!context.available()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, context.message());
+        }
+        return createConversation(actor, new CreateConversationRequest(
+                context.knowledgeBaseId(), "产品助手 · 新对话", context.scenarioCode()));
     }
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public ConversationSession create(@Valid @RequestBody CreateConversationRequest request,
                                       HttpServletRequest servletRequest) {
-        AuthenticatedUser actor = requireActor(servletRequest);
+        return createConversation(requireActor(servletRequest), request);
+    }
+
+    private ConversationSession createConversation(AuthenticatedUser actor, CreateConversationRequest request) {
         if (request.knowledgeBaseId() != null && !request.knowledgeBaseId().isBlank()) {
             knowledgeBaseService.getKnowledgeBase(request.knowledgeBaseId());
         }
