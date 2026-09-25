@@ -89,7 +89,7 @@
                   <summary><span><CommandLineIcon />链路追溯</span><small>{{ message.traces.length }} 个步骤</small></summary>
                   <ol class="trace-list"><li v-for="(step, traceIndex) in message.traces" :key="traceIndex" :class="step.status"><span class="trace-dot"></span><div><div class="trace-heading"><span class="phase-badge">{{ tracePhaseLabel(step.phase) }}</span><strong>{{ step.title }}</strong><time v-if="step.durationMs !== null && step.durationMs !== undefined">{{ step.durationMs }} ms</time></div><p>{{ step.detail }}</p></div></li></ol>
                 </details>
-                <CitationSources v-if="message.citations?.length" :citations="message.citations" />
+                <CitationSources v-if="message.citations?.length" :citations="message.citations" :answer="message.content" :knowledge-base-id="selectedKnowledgeBaseId" />
                 <div v-if="message.interrupted" class="message-interruption" role="alert"><ExclamationCircleIcon /><span>回答中断：{{ message.interruptionMessage || '连接已断开' }}。可重新生成或同步会话后继续。</span><button type="button" :disabled="sending" @click="retryInterruptedAnswer(index)">重新生成</button><button type="button" :disabled="sending" @click="discardInterruptedAnswer">同步并继续</button></div>
             </div>
             <div v-if="!message.streaming && message.content" class="message-actions" :aria-label="`${message.role === 'user' ? '用户消息' : 'AI 回复'}操作`">

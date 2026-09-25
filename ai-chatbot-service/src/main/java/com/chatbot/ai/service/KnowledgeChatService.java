@@ -125,7 +125,7 @@ public class KnowledgeChatService {
                     "failed", elapsedMs(modelStartedAt)));
             throw exception;
         }
-        return completeSuccessfulAnswer(prepared, traceId, modelStartedAt, answer);
+        return completeSuccessfulAnswer(prepared, traceId, modelStartedAt, answer, question);
     }
 
     /**
@@ -178,7 +178,7 @@ public class KnowledgeChatService {
                 return bufferedModelEvents(() -> {
                     String answer = callModel(prepared, conversationId, traceId);
                     AnswerResult result = completeSuccessfulAnswer(
-                            prepared, traceId, modelStartedAt, answer);
+                            prepared, traceId, modelStartedAt, answer, question);
                     traceClosed.set(true);
                     return result;
                 }, BUFFERED_DELTA_DELAY).doFinally(signal -> {
@@ -208,7 +208,7 @@ public class KnowledgeChatService {
                     .concatWith(Mono.fromSupplier(() -> {
                         traceClosed.set(true);
                         AnswerResult result = completeSuccessfulAnswer(
-                                prepared, traceId, modelStartedAt, fullAnswer.toString());
+                                prepared, traceId, modelStartedAt, fullAnswer.toString(), question);
                         return new AnswerCompleted(result);
                     }))
                     .doOnError(exception -> {
@@ -476,7 +476,7 @@ public class KnowledgeChatService {
 
                 %s
 
-                政策性结论只依据以上资料；订单、客户和工单事实只依据已授权工具的实际结果。资料或业务数据不足时请明确说明，不得编造。回答应简洁、准确，并在政策内容后用 [资料 N] 标注来源。
+                政策性结论只依据以上资料；订单、客户和工单事实只依据已授权工具的实际结果。资料或业务数据不足时请明确说明，不得编造。只回答用户当前问到的主题；不要因为检索到相邻主题就补充未被问到的政策、处理流程或业务状态。回答应简洁、准确，并在政策内容后用 [资料 N] 标注直接支持该结论的来源。只被检索到、却未支持该结论的资料不要标注；仅当多份资料分别提供必要依据时才并列标注。
                 """.formatted(scenarioInstruction, question, context);
 
         return new PreparedAnswer(chatClient, userPrompt, safeMedia, true, citations.size(),
@@ -487,7 +487,8 @@ public class KnowledgeChatService {
     private AnswerResult completeSuccessfulAnswer(PreparedAnswer prepared,
                                                   String traceId,
                                                   long modelStartedAt,
-                                                  String answer) {
+                                                  String answer,
+                                                  String question) {
         List<ChatTraceStep> toolTraces = toolTraceRecorder.finish(traceId);
         if (toolTraces.isEmpty()) {
             prepared.traces().add(trace("tool", "业务工具",
@@ -506,7 +507,9 @@ public class KnowledgeChatService {
                     "使用 " + modelName + " 完成回答，注入 " + prepared.knowledgeChunkCount() + " 个知识片段",
                     "completed", elapsedMs(modelStartedAt)));
             prepared.traces().add(trace("complete", "链路完成",
-                    "返回 " + prepared.citations().size() + " 个可追溯来源",
+                    "检索 " + prepared.citations().size() + " 个候选片段，回答标注 "
+                            + CitationEvidenceSelector.citedSourceNumbers(
+                                    answer, prepared.citations().size()).size() + " 个来源",
                     "completed", elapsedMs(prepared.chainStartedAt())));
         } else {
             prepared.traces().add(trace("model", "模型生成",
@@ -516,7 +519,17 @@ public class KnowledgeChatService {
                     "普通对话未使用知识片段；业务工具调用结果见链路记录",
                     "completed", elapsedMs(prepared.chainStartedAt())));
         }
-        return new AnswerResult(answer, new ArrayList<>(prepared.citations()),
+        List<ChatCitation> focusedCitations = new ArrayList<>();
+        for (int index = 0; index < prepared.citations().size(); index++) {
+            ChatCitation citation = prepared.citations().get(index);
+            CitationEvidenceSelector.Evidence evidence = CitationEvidenceSelector.select(
+                    citation.getExcerpt(), question, answer, index + 1);
+            focusedCitations.add(ChatCitation.builder()
+                    .documentId(citation.getDocumentId()).chunkId(citation.getChunkId())
+                    .fileName(citation.getFileName()).pageNumber(citation.getPageNumber())
+                    .sectionTitle(evidence.sectionTitle()).excerpt(evidence.excerpt()).build());
+        }
+        return new AnswerResult(answer, focusedCitations,
                 new ArrayList<>(prepared.traces()));
     }
 

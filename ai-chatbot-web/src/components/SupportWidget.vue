@@ -15,6 +15,7 @@ import {
 } from '@heroicons/vue/24/outline'
 import PendingActionCard from './PendingActionCard.vue'
 import CitationSources from './CitationSources.vue'
+import { citationPresentation } from '../services/citationSources'
 import { BASE_URL, conversationAPI, createRequestId, pendingActionAPI } from '../services/api'
 import { authState } from '../services/auth'
 
@@ -71,6 +72,11 @@ const supportSessions = computed(() => recentSessions.value.filter(item =>
     && item.knowledgeBaseId === assistantContext.value?.knowledgeBaseId
 ).slice(0, 8))
 const assistantReady = computed(() => assistantContext.value?.available === true)
+
+function citationSummary(message) {
+  const presentation = citationPresentation(message.citations, message.content)
+  return `${presentation.hasAnswerReferences ? '参考来源' : '检索候选'} · ${presentation.snippetCount}`
+}
 
 let panelDrag = null
 let launcherDrag = null
@@ -955,8 +961,8 @@ onBeforeUnmount(() => {
                     <button type="button" :disabled="sending" @click="discardInterruptedAnswer">同步并继续</button>
                   </div>
                   <details v-if="message.citations?.length" class="support-widget-citations">
-                    <summary>参考来源 · {{ message.citations.length }}</summary>
-                    <CitationSources :citations="message.citations" compact :show-heading="false" />
+                    <summary>{{ citationSummary(message) }}</summary>
+                    <CitationSources :citations="message.citations" :answer="message.content" :knowledge-base-id="assistantContext?.knowledgeBaseId || ''" compact :show-heading="false" />
                   </details>
                 </template>
                 <div v-if="message.attachments?.length" class="support-widget-message-attachments">

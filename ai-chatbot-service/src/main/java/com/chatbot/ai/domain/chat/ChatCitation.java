@@ -14,5 +14,6 @@ public class ChatCitation {
     private String chunkId;
     private String fileName;
     private Integer pageNumber;
+    private String sectionTitle;
     private String excerpt;
 }

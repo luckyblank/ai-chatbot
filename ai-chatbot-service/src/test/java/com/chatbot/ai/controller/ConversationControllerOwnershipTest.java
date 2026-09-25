@@ -86,24 +86,31 @@ class ConversationControllerOwnershipTest {
     }
 
     @Test
-    void existingConversationShowsFullHitTextWithoutChangingStoredCitation() throws Exception {
+    void existingConversationShowsFocusedEvidenceWithoutChangingStoredCitation() throws Exception {
         ChatCitation savedCitation = ChatCitation.builder()
                 .documentId("document-1").chunkId("chunk-1")
                 .fileName("售后手册.md").excerpt("旧的 180 字摘要…").build();
         ConversationSession saved = session(OPERATOR_A.id());
         saved.setKnowledgeBaseId("base-1");
-        saved.setMessages(List.of(ChatMessageEntry.builder()
-                .role("assistant").content("回答").citations(List.of(savedCitation)).build()));
+        saved.setMessages(List.of(
+                ChatMessageEntry.builder().role("user").content("七日无理由退货怎么判断？").build(),
+                ChatMessageEntry.builder().role("assistant")
+                        .content("先核对签收后的七日窗口。[资料 1]")
+                        .citations(List.of(savedCitation)).build()));
         when(repository.findById("conversation-1")).thenReturn(Optional.of(saved));
         when(chunkRepository.findById("chunk-1")).thenReturn(Optional.of(KnowledgeChunk.builder()
                 .id("chunk-1").knowledgeBaseId("base-1").documentId("document-1")
-                .content("完整的命中片段\n包含后续段落").build()));
+                .content("# 一、服务范围\n客服应记录订单信息。\n# 三、七日无理由退货判断\n"
+                        + "网络销售应先判断消费者是否处于签收后的七日窗口，再核对法定例外。")
+                .build()));
 
         mvc.perform(get("/api/v1/conversations/conversation-1")
                         .requestAttr(AuthInterceptor.USER_ATTRIBUTE, OPERATOR_A))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.messages[0].citations[0].excerpt")
-                        .value("完整的命中片段\n包含后续段落"));
+                .andExpect(jsonPath("$.messages[1].citations[0].excerpt")
+                        .value("网络销售应先判断消费者是否处于签收后的七日窗口，再核对法定例外。"))
+                .andExpect(jsonPath("$.messages[1].citations[0].sectionTitle")
+                        .value("三、七日无理由退货判断"));
         assertThat(savedCitation.getExcerpt()).isEqualTo("旧的 180 字摘要…");
     }
 

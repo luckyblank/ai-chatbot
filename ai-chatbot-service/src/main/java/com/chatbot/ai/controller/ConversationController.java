@@ -16,6 +16,7 @@ import com.chatbot.ai.service.KnowledgeBaseService;
 import com.chatbot.ai.service.KnowledgeChatService;
 import com.chatbot.ai.service.AttachmentService;
 import com.chatbot.ai.service.ConversationTitleService;
+import com.chatbot.ai.service.CitationEvidenceSelector;
 import com.chatbot.ai.service.WidgetAssistantService;
 import com.chatbot.ai.security.AuthInterceptor;
 import jakarta.validation.Valid;
@@ -85,21 +86,32 @@ public class ConversationController {
 
     @GetMapping("/{conversationId}")
     public ConversationSession get(@PathVariable String conversationId, HttpServletRequest request) {
-        return withFullCitationExcerpts(requireOwnedConversation(conversationId, requireActor(request)));
+        return withFocusedCitationExcerpts(requireOwnedConversation(conversationId, requireActor(request)));
     }
 
-    private ConversationSession withFullCitationExcerpts(ConversationSession session) {
+    private ConversationSession withFocusedCitationExcerpts(ConversationSession session) {
         if (session.getKnowledgeBaseId() == null || session.getMessages() == null) return session;
-        List<ChatMessageEntry> messages = session.getMessages().stream().map(message -> {
-            if (message.getCitations() == null || message.getCitations().isEmpty()) return message;
-            List<ChatCitation> citations = message.getCitations().stream()
-                    .map(citation -> withFullCitationExcerpt(session.getKnowledgeBaseId(), citation)).toList();
-            return ChatMessageEntry.builder()
+        List<ChatMessageEntry> messages = new ArrayList<>();
+        String lastQuestion = "";
+        for (ChatMessageEntry message : session.getMessages()) {
+            if ("user".equalsIgnoreCase(message.getRole())) {
+                lastQuestion = message.getContent() == null ? "" : message.getContent();
+            }
+            if (message.getCitations() == null || message.getCitations().isEmpty()) {
+                messages.add(message);
+                continue;
+            }
+            List<ChatCitation> citations = new ArrayList<>();
+            for (int index = 0; index < message.getCitations().size(); index++) {
+                citations.add(withFocusedCitationExcerpt(session.getKnowledgeBaseId(),
+                        message.getCitations().get(index), lastQuestion, message.getContent(), index + 1));
+            }
+            messages.add(ChatMessageEntry.builder()
                     .requestId(message.getRequestId()).role(message.getRole())
                     .content(message.getContent()).createdAt(message.getCreatedAt())
                     .attachments(message.getAttachments()).citations(citations)
-                    .traces(message.getTraces()).build();
-        }).toList();
+                    .traces(message.getTraces()).build());
+        }
         return ConversationSession.builder()
                 .id(session.getId()).ownerId(session.getOwnerId())
                 .knowledgeBaseId(session.getKnowledgeBaseId()).scenarioCode(session.getScenarioCode())
@@ -108,18 +120,26 @@ public class ConversationController {
                 .messages(messages).build();
     }
 
-    private ChatCitation withFullCitationExcerpt(String knowledgeBaseId, ChatCitation citation) {
-        if (citation == null || citation.getChunkId() == null || citation.getChunkId().isBlank()
-                || citation.getDocumentId() == null || citation.getDocumentId().isBlank()) return citation;
-        return chunkRepository.findById(citation.getChunkId())
-                .filter(chunk -> knowledgeBaseId.equals(chunk.getKnowledgeBaseId()))
-                .filter(chunk -> Objects.equals(chunk.getDocumentId(), citation.getDocumentId()))
-                .filter(chunk -> chunk.getContent() != null)
-                .map(chunk -> ChatCitation.builder()
-                        .documentId(citation.getDocumentId()).chunkId(citation.getChunkId())
-                        .fileName(citation.getFileName()).pageNumber(citation.getPageNumber())
-                        .excerpt(chunk.getContent().trim()).build())
-                .orElse(citation);
+    private ChatCitation withFocusedCitationExcerpt(String knowledgeBaseId, ChatCitation citation,
+                                                    String question, String answer, int sourceNumber) {
+        if (citation == null) return null;
+        String sourceText = citation.getExcerpt();
+        if (citation.getChunkId() != null && !citation.getChunkId().isBlank()
+                && citation.getDocumentId() != null && !citation.getDocumentId().isBlank()) {
+            sourceText = chunkRepository.findById(citation.getChunkId())
+                    .filter(chunk -> knowledgeBaseId.equals(chunk.getKnowledgeBaseId()))
+                    .filter(chunk -> Objects.equals(chunk.getDocumentId(), citation.getDocumentId()))
+                    .filter(chunk -> chunk.getContent() != null)
+                    .map(chunk -> chunk.getContent().trim())
+                    .orElse(sourceText);
+        }
+        CitationEvidenceSelector.Evidence evidence = CitationEvidenceSelector.select(
+                sourceText, question, answer, sourceNumber);
+        return ChatCitation.builder()
+                .documentId(citation.getDocumentId()).chunkId(citation.getChunkId())
+                .fileName(citation.getFileName()).pageNumber(citation.getPageNumber())
+                .sectionTitle(evidence.sectionTitle() == null ? citation.getSectionTitle() : evidence.sectionTitle())
+                .excerpt(evidence.excerpt()).build();
     }
 
     @GetMapping("/widget/context")
