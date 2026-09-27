@@ -56,6 +56,16 @@ class ScenarioToolPolicyTest {
         assertThat(policy.allowedCallbacks(scenario("未注册的自定义工具"))).isEmpty();
     }
 
+    @Test
+    void stableIdsAndLegacyAliasesResolveToTheSameCallbacks() {
+        ScenarioToolPolicy policy = policyWithAllCallbacks();
+
+        assertThat(names(policy.allowedCallbacks(scenario(
+                "customer-orders", "order-fulfillment", "prepare-service-ticket"))))
+                .containsExactlyInAnyOrder("queryCustomerOrders", "queryOrder", "prepareServiceTicket");
+        assertThat(policy.isAllowed(scenario("创建运营工单"), "prepareServiceTicket")).isTrue();
+    }
+
     @SuppressWarnings("unchecked")
     private ScenarioToolPolicy policyWithAllCallbacks() {
         ObjectProvider<ToolCallbackProvider> provider = mock(ObjectProvider.class);

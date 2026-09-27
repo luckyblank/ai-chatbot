@@ -620,9 +620,10 @@ public class KnowledgeChatService {
         if (scenario == null) {
             return "当前业务场景：" + code;
         }
-        String tools = scenario.getTools() == null || scenario.getTools().isEmpty()
+        List<String> availableTools = ScenarioToolCatalog.displayNamesFor(scenario.getTools());
+        String tools = availableTools.isEmpty()
                 ? "不允许调用业务工具"
-                : String.join("、", scenario.getTools());
+                : String.join("、", availableTools);
         String process = scenario.getProcess() == null || scenario.getProcess().isEmpty()
                 ? "按用户目标合理处理"
                 : String.join(" → ", scenario.getProcess());

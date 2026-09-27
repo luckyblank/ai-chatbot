@@ -11,7 +11,7 @@ import {
 import SidebarPanelIcon from './components/icons/SidebarPanelIcon.vue'
 import SupportWidget from './components/SupportWidget.vue'
 import AccountMenu from './components/AccountMenu.vue'
-import { mergeScenarios, scenarios } from './data/scenarios'
+import { mergeScenarioToolCatalog, mergeScenarios, scenarios } from './data/scenarios'
 import { authAPI, conversationAPI, knowledgeAPI, scenarioAPI, workflowAPI } from './services/api'
 import { authState, clearAuthenticatedUser } from './services/auth'
 import { aiStatusState, describeAiStatus, refreshAiStatus, resetAiStatus } from './services/aiStatus'
@@ -152,6 +152,7 @@ onMounted(() => {
   window.addEventListener('keydown', handleKeydown)
   window.addEventListener('auth:required', handleAuthRequired)
   scenarioAPI.list().then(mergeScenarios).catch(() => { /* 后端不可用时保留内置场景，避免阻断主界面 */ })
+  scenarioAPI.toolCatalog().then(mergeScenarioToolCatalog).catch(() => { /* 工具目录不可用时保留已有场景展示 */ })
 })
 onBeforeUnmount(() => { window.removeEventListener('keydown', handleKeydown); window.removeEventListener('auth:required', handleAuthRequired) })
 </script>

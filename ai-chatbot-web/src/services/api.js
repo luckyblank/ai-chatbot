@@ -247,6 +247,7 @@ export const workflowAPI = {
 export const scenarioAPI = {
   list: () => request('/api/v1/scenarios'),
   get: (code) => request(`/api/v1/scenarios/${encodeURIComponent(code)}`),
+  toolCatalog: () => request('/api/v1/scenarios/tool-catalog'),
   update: (code, payload) => request(`/api/v1/scenarios/${encodeURIComponent(code)}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
   })

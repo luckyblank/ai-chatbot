@@ -70,7 +70,7 @@
               <h3>{{ scenario.name }}</h3>
               <p>{{ scenario.summary }}</p>
               <span>{{ scenario.knowledgeMode === '可选' ? '知识库可选' : `知识库${scenario.knowledgeMode}` }}</span>
-              <span>{{ scenario.tools.length }} 个业务工具</span>
+              <span>{{ configuredToolCount(scenario.tools) }} 个业务工具{{ unrecognizedToolCount(scenario.tools) ? ` · ${unrecognizedToolCount(scenario.tools)} 项待修正` : '' }}</span>
             </div>
             <ArrowUpRightIcon class="card-arrow" />
           </RouterLink>
@@ -164,7 +164,7 @@ import {
   CircleStackIcon,
   CpuChipIcon
 } from '@heroicons/vue/24/outline'
-import { scenarios } from '../data/scenarios'
+import { configuredToolCount, scenarios, unrecognizedToolCount } from '../data/scenarios'
 import { conversationAPI, knowledgeAPI } from '../services/api'
 import WorkbenchServices from '../components/WorkbenchServices.vue'
 

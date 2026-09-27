@@ -11,6 +11,31 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class ScenarioRepositoryMigrationTest {
     @Test
+    void upgradesOnlyUntouchedGeneralDefaultSteps() {
+        var dataSource = new DriverManagerDataSource(
+                "jdbc:h2:mem:scenario-general-migration;MODE=MySQL;DB_CLOSE_DELAY=-1", "sa", "");
+        ScenarioRepository scenarios = new ScenarioRepository(new JdbcTemplate(dataSource), new ObjectMapper());
+        scenarios.initialize();
+
+        var general = scenarios.findByCode("general").orElseThrow();
+        assertThat(general.getProcess()).containsExactly(
+                "理解用户目标", "缺少关键信息时先澄清", "根据已知信息生成结果", "必要时说明下一步");
+
+        general.setProcess(List.of("理解任务", "澄清约束", "生成结果", "确认下一步"));
+        scenarios.save(general);
+        scenarios.initialize();
+        assertThat(scenarios.findByCode("general").orElseThrow().getProcess()).containsExactly(
+                "理解用户目标", "缺少关键信息时先澄清", "根据已知信息生成结果", "必要时说明下一步");
+
+        general = scenarios.findByCode("general").orElseThrow();
+        general.setProcess(List.of("这是自定义步骤"));
+        scenarios.save(general);
+        scenarios.initialize();
+        assertThat(scenarios.findByCode("general").orElseThrow().getProcess())
+                .containsExactly("这是自定义步骤");
+    }
+
+    @Test
     void addsCustomerOrderLookupToExistingDefaultWithoutOverwritingCustomAllowlist() {
         var dataSource = new DriverManagerDataSource(
                 "jdbc:h2:mem:scenario-order-migration;MODE=MySQL;DB_CLOSE_DELAY=-1", "sa", "");

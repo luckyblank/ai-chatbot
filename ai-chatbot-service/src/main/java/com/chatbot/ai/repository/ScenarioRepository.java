@@ -17,6 +17,8 @@ import java.util.Optional;
 @Repository
 @RequiredArgsConstructor
 public class ScenarioRepository {
+    private static final List<String> GENERAL_PROCESS = List.of(
+            "理解用户目标", "缺少关键信息时先澄清", "根据已知信息生成结果", "必要时说明下一步");
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
 
@@ -38,7 +40,10 @@ public class ScenarioRepository {
                 """);
         Integer count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM ai_scenario", Integer.class);
         if (count != null && count == 0) seedDefaults();
-        else upgradeDefaultCommerceTools();
+        else {
+            upgradeDefaultCommerceTools();
+            upgradeDefaultGeneralProcess();
+        }
     }
 
     public List<ScenarioDefinition> findAll() {
@@ -86,7 +91,7 @@ public class ScenarioRepository {
     private void seedDefaults() {
         save(defaultScenario(0, "general", "通用智能助手", "通用助手",
                 "不依赖知识库的日常分析、写作与信息整理。", "可选", List.of(),
-                List.of("理解任务", "澄清约束", "生成结果", "确认下一步"),
+                GENERAL_PROCESS,
                 "不虚构企业内部数据，不执行业务写操作。"));
         save(defaultScenario(1, "commerce-support", "电商售后服务", "电商售后",
                 "覆盖订单、物流、退换货、退款资格与售后工单。", "推荐",
@@ -126,6 +131,16 @@ public class ScenarioRepository {
                 changed = true;
             }
             if (changed) {
+                scenario.setUpdatedAt(Instant.now());
+                save(scenario);
+            }
+        });
+    }
+
+    private void upgradeDefaultGeneralProcess() {
+        findByCode("general").ifPresent(scenario -> {
+            if (scenario.getProcess().equals(List.of("理解任务", "澄清约束", "生成结果", "确认下一步"))) {
+                scenario.setProcess(GENERAL_PROCESS);
                 scenario.setUpdatedAt(Instant.now());
                 save(scenario);
             }

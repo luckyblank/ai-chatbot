@@ -91,7 +91,7 @@ public class CustomerServiceTools {
         return result;
     }
 
-    @Tool(description = "检查订单是否满足退款、退货或换货的基础资格。结果仅用于客服初筛，不能替代最终审核。")
+    @Tool(description = "核对订单号及退款、退货或换货诉求，并返回人工复核提示。仅在所选知识库有已索引文档且本轮检索命中相关片段时向模型开放；当前不会自动认定售后资格通过。")
     public EligibilityResult checkAfterSalesEligibility(
             @ToolParam(description = "订单号") String orderNo,
             @ToolParam(description = "售后动作：退款、退货或换货") String requestedAction,

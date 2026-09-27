@@ -143,17 +143,8 @@ public class WorkflowNodeExecutor {
             case "queryBusinessSubject" -> "subjectNo";
             default -> throw new IllegalArgumentException("试运行不允许调用该业务工具：" + operation + "。仅支持只读查询，写入操作必须走正式审批流程。");
         };
-        Set<String> requiredLabels = switch (operation) {
-            case "queryOrder" -> Set.of("订单履约查询", "服务订单查询");
-            case "queryCustomerOrders" -> Set.of("客户订单查询");
-            case "queryCustomerEntitlements" -> Set.of("客户权益查询");
-            case "queryBusinessSubject" -> Set.of("业务主体查询", "商家主体查询");
-            case "queryServiceTickets" -> Set.of("工单进度查询", "服务工单查询");
-            default -> Set.of();
-        };
         var scenario = scenarioCode == null ? null : scenarios.findByCode(scenarioCode).orElse(null);
-        if (scenario == null || scenario.getTools() == null
-                || scenario.getTools().stream().noneMatch(requiredLabels::contains)) {
+        if (scenario == null || !ScenarioToolCatalog.callbackNamesFor(scenario.getTools()).contains(operation)) {
             throw new IllegalArgumentException("当前业务场景未授权该查询工具：" + operation);
         }
         String argumentField = config.path("argumentField").asText(defaultField);

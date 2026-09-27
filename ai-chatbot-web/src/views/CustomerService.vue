@@ -37,7 +37,7 @@
                 <article v-for="session in group.items" :key="session.id" :class="{ active: session.id === currentConversationId }">
                   <button class="session-open" type="button" :disabled="sending" :aria-current="session.id === currentConversationId ? 'true' : undefined" :aria-label="`打开会话：${session.title || '新对话'}`" @click="selectConversation(session.id)">
                     <ChatBubbleLeftRightIcon class="session-icon" />
-                    <span class="session-copy"><span class="title-viewport"><strong v-title-overflow class="title-track">{{ session.title || '新对话' }}</strong></span><small>{{ conversationMeta(session) }}</small></span>
+                    <span class="session-copy"><span class="title-viewport" :title="session.title || '新对话'"><strong v-title-overflow class="title-track">{{ session.title || '新对话' }}</strong></span><small>{{ conversationMeta(session) }}</small></span>
                   </button>
                   <span class="session-actions" aria-label="会话操作"><button type="button" title="修改名称" :aria-label="`修改会话名称：${session.title || '新对话'}`" @click.stop="startRename(session)"><PencilSquareIcon /></button><button type="button" title="删除会话" :aria-label="`删除会话：${session.title || '新对话'}`" @click.stop="startDelete(session)"><TrashIcon /></button></span>
                 </article>
@@ -64,7 +64,7 @@
           <span class="mode-label">{{ selectedScenario.name }}</span>
           <h1>{{ selectedKnowledgeBaseId ? '基于企业知识开始对话' : '直接开始一次智能对话' }}</h1>
           <p>{{ selectedKnowledgeBaseId ? `回答将从“${currentKnowledgeBase?.name}”检索依据，并展示引用与完整链路。` : '当前未选择知识库，问题会直接交给模型，不执行向量检索。' }}</p>
-          <div class="starter-grid"><button v-for="step in selectedScenario.process.slice(0, 3)" :key="step" @click="input = `请帮我完成：${step}`"><ArrowUpRightIcon />{{ step }}</button></div>
+          <div class="starter-grid"><button v-for="prompt in starterPromptsForScenario(selectedScenario.code)" :key="prompt" @click="input = prompt"><ArrowUpRightIcon />{{ prompt }}</button></div>
         </div>
 
         <article v-for="(message, index) in messages" :key="index" class="message" :class="message.role">
@@ -140,10 +140,10 @@
     <aside class="context-sidebar" :class="{ collapsed: contextSidebarCollapsed }">
       <button class="collapsed-rail" type="button" title="展开场景指引" aria-label="展开场景指引" @click="toggleContextSidebar"><InformationCircleIcon /><span>场景</span></button>
       <div class="context-sidebar-content">
-        <header><span>场景指引</span><RouterLink :to="{ path: '/scenarios', query: { scenario: selectedScenario.code, edit: '1' } }">编辑场景</RouterLink></header>
+        <header><span>场景指引</span><RouterLink v-if="authState.user?.role === 'ADMIN'" :to="{ path: '/scenarios', query: { scenario: selectedScenario.code, edit: '1' } }">编辑场景</RouterLink></header>
         <section><label>当前场景</label><h2>{{ selectedScenario.name }}</h2><p>{{ selectedScenario.summary }}</p></section>
-        <section><label>建议处理步骤</label><ol class="process-list"><li v-for="(step, index) in selectedScenario.process" :key="step"><span>{{ index + 1 }}</span>{{ step }}</li></ol></section>
-        <section><label>允许的业务工具</label><div v-if="selectedScenario.tools.length" class="tool-list"><span v-for="tool in selectedScenario.tools" :key="tool"><WrenchScrewdriverIcon />{{ tool }}</span></div><p v-else>该场景不开放业务工具。</p><p v-if="selectedScenarioCode === 'commerce-support'">可用客户编号查询其订单；客服登录账号 ID 不能代替客户编号。</p></section>
+        <section><label>处理指引</label><ol class="process-list"><li v-for="(step, index) in selectedScenario.process" :key="step"><span>{{ index + 1 }}</span>{{ step }}</li></ol><p>按当前问题选择适用步骤，实际执行情况请查看链路追溯。</p></section>
+        <section><label>已配置业务工具</label><div v-if="configuredToolLabels(selectedScenario.tools).length" class="tool-list"><span v-for="tool in configuredToolLabels(selectedScenario.tools)" :key="tool"><WrenchScrewdriverIcon />{{ tool }}</span></div><p v-else>该场景不开放业务工具。</p><p v-if="unrecognizedToolCount(selectedScenario.tools)">另有 {{ unrecognizedToolCount(selectedScenario.tools) }} 项历史工具不可用，请联系管理员修正。</p><p v-if="selectedScenarioCode === 'commerce-support'">可用客户编号查询其订单；客服登录账号 ID 不能代替客户编号。</p></section>
         <section><label>知识上下文</label><div class="knowledge-context"><CircleStackIcon /><span><strong>{{ currentKnowledgeBase?.name || '未选择知识库' }}</strong><small>{{ currentKnowledgeBase ? '回答将执行向量检索' : '当前为普通聊天模式' }}</small></span></div><RouterLink class="manage-knowledge" :to="selectedKnowledgeBaseId ? { path: '/knowledge-bases', query: { knowledge: selectedKnowledgeBaseId } } : '/knowledge-bases'">进入知识中心</RouterLink></section>
         <section class="guardrail"><ShieldCheckIcon /><div><label>业务边界</label><p>{{ selectedScenario.guardrail }}</p></div></section>
       </div>
@@ -174,7 +174,8 @@ import CitationSources from '../components/CitationSources.vue'
 import ImagePreview from '../components/ImagePreview.vue'
 import PendingActionCard from '../components/PendingActionCard.vue'
 import PanelEdgeHandleIcon from '../components/icons/PanelEdgeHandleIcon.vue'
-import { scenarios, scenarioByCode } from '../data/scenarios'
+import { configuredToolLabels, scenarios, scenarioByCode, starterPromptsForScenario, unrecognizedToolCount } from '../data/scenarios'
+import { authState } from '../services/auth'
 import { BASE_URL, conversationAPI, createRequestId, knowledgeAPI, pendingActionAPI } from '../services/api'
 
 const route = useRoute()
@@ -238,14 +239,20 @@ let attachmentDragDepth = 0
 let pendingActionPollTimer = 0
 let pendingActionRequestVersion = 0
 
+function updateTitleOverflow(element) {
+  const viewport = element.parentElement
+  if (!viewport) return
+  const overflow = Math.max(0, element.scrollWidth - viewport.clientWidth)
+  viewport.classList.toggle('is-overflowing', overflow > 1)
+  const scrollDistance = Math.ceil(overflow + 12)
+  element.style.setProperty('--title-overflow', `${scrollDistance}px`)
+  element.style.setProperty('--title-scroll-duration', `${Math.max(6, Math.min(20, Math.round(scrollDistance / 24 + 5)))}s`)
+}
+
 const vTitleOverflow = {
   mounted(element) {
     const viewport = element.parentElement
-    const update = () => {
-      const overflow = Math.max(0, element.scrollWidth - element.clientWidth)
-      viewport?.classList.toggle('is-overflowing', overflow > 1)
-      element.style.setProperty('--title-overflow', `${overflow}px`)
-    }
+    const update = () => updateTitleOverflow(element)
     const observer = new ResizeObserver(update)
     observer.observe(element)
     if (viewport) observer.observe(viewport)
@@ -253,12 +260,7 @@ const vTitleOverflow = {
     requestAnimationFrame(update)
   },
   updated(element) {
-    requestAnimationFrame(() => {
-      const viewport = element.parentElement
-      const overflow = Math.max(0, element.scrollWidth - element.clientWidth)
-      viewport?.classList.toggle('is-overflowing', overflow > 1)
-      element.style.setProperty('--title-overflow', `${overflow}px`)
-    })
+    requestAnimationFrame(() => updateTitleOverflow(element))
   },
   unmounted(element) {
     element._titleOverflowObserver?.disconnect()
@@ -1097,6 +1099,12 @@ function queueScrollToBottom() {
 .composer .stop-button{color:var(--danger);background:color-mix(in srgb,var(--danger) 10%,var(--surface));border:1px solid color-mix(in srgb,var(--danger) 28%,var(--border-color));font-size:11px;font-weight:700;cursor:pointer}
 .composer .stop-button:hover{background:color-mix(in srgb,var(--danger) 17%,var(--surface))}
 
+.session-group-items>article{width:100%;display:grid;grid-template-columns:minmax(0,1fr) 58px;align-items:stretch;overflow:hidden;color:var(--text-muted);border-radius:8px}
+.session-group-items>article:hover{background:var(--surface)}
+.session-group-items>article.active{color:var(--primary);background:var(--primary-soft)}
+.session-group-items .session-open{grid-template-columns:18px minmax(0,1fr);gap:7px;padding-right:4px;padding-left:8px}
+.session-sidebar .session-open .title-viewport.is-overflowing .title-track{overflow:visible;text-overflow:clip;animation:titleMarquee var(--title-scroll-duration,6s) linear .25s infinite alternate}
+@media(prefers-reduced-motion:reduce){.session-sidebar .session-open .title-viewport.is-overflowing .title-track{overflow:hidden;text-overflow:ellipsis;animation:none}}
 .session-group h3{padding:0}
 .session-group-toggle{width:100%;display:flex;align-items:center;gap:6px;padding:7px;color:inherit;background:transparent;border:0;border-radius:6px;text-align:left;font:inherit;cursor:pointer;transition:color .16s ease,background-color .16s ease}
 .session-group-toggle>span{margin-right:auto}

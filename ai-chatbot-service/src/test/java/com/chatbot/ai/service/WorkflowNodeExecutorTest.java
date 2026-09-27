@@ -83,6 +83,21 @@ class WorkflowNodeExecutorTest {
     }
 
     @Test
+    void executesAuthorizedReadOnlyOrderQueryAfterScenarioStoresStableId() throws Exception {
+        when(scenarios.findByCode("commerce-support")).thenReturn(Optional.of(
+                ScenarioDefinition.builder().code("commerce-support")
+                        .tools(List.of("order-fulfillment")).build()));
+        when(authorization.requireOrderAccess(ACTOR, "ORD-123")).thenReturn(null);
+
+        Map<String, Object> result = executor.execute(node("tool"),
+                mapper.readTree("{\"operation\":\"queryOrder\"}"),
+                Map.of("orderNo", "ORD-123"), null, "commerce-support", ACTOR);
+
+        assertThat(result).containsEntry("operation", "queryOrder");
+        verify(authorization).requireOrderAccess(ACTOR, "ORD-123");
+    }
+
+    @Test
     void listsCustomerOrdersOnlyWhenScenarioAndActorAuthorizeCustomer() throws Exception {
         when(scenarios.findByCode("commerce-support")).thenReturn(Optional.of(
                 ScenarioDefinition.builder().code("commerce-support")
