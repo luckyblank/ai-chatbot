@@ -4,6 +4,22 @@
 
 工作流设计器现支持表单化节点配置、右侧试运行面板、场景用例、运行前检查与保存后运行。原系统管理已并入智能工作台的运行环境区域。使用步骤、测试矩阵和 Docker 验收命令见 [工作流重构与测试用例](docs/工作流重构与测试用例.md)。
 
+## 项目预览
+
+以下截图来自本地演示环境。点击图片可查看原图。
+
+| 智能工作台 | 会话中心 |
+| --- | --- |
+| [![智能工作台：业务场景、知识与服务状态](docs/screenshots/workbench.png)](docs/screenshots/workbench.png) | [![会话中心：业务场景、知识范围与处理指引](docs/screenshots/conversation.png)](docs/screenshots/conversation.png) |
+
+| 知识中心 | 场景配置 |
+| --- | --- |
+| [![知识中心：知识库与文档管理](docs/screenshots/knowledge-base.png)](docs/screenshots/knowledge-base.png) | [![场景配置：知识策略、业务工具与处理指引](docs/screenshots/scenario.png)](docs/screenshots/scenario.png) |
+
+**工作流设计器**
+
+[![工作流设计器：售后分流流程与节点配置](docs/screenshots/workflow-designer.png)](docs/screenshots/workflow-designer.png)
+
 ## 快速体验
 
 开发环境和 Docker 部署环境分开配置：后端默认使用 `dev` profile，Docker Compose 显式传入 `SPRING_PROFILES_ACTIVE=docker`。两套环境各自读取自己的配置；默认都关闭模型能力，离线订单工作流仍可演示。
