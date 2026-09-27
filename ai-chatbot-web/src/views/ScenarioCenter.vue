@@ -22,7 +22,7 @@
             <div class="detail-actions"><button v-if="canEdit && scenariosReady" type="button" @click="startEdit"><PencilSquareIcon />编辑配置</button><RouterLink :to="`/customer-service?scenario=${selected.code}`">进入场景</RouterLink></div>
           </div>
           <div class="policy-grid">
-            <section><label>知识策略</label><strong>知识库{{ selected.knowledgeMode }}</strong><p>{{ knowledgeDescription }}</p></section>
+            <section><label>知识策略</label><strong>知识库{{ selected.knowledgeMode }}</strong><p>{{ knowledgeDescription }}</p><p>可用范围：{{ selectedKnowledgeScope }}</p><p>新会话默认：{{ selectedKnowledgeDefaults }}</p></section>
             <section><label>业务工具</label><strong>{{ catalogReady ? selectedToolStatus.available.length + ' 个已配置工具' : catalogError ? '工具配置暂不可核对' : '正在核对工具配置…' }}</strong><p v-if="catalogReady">{{ selectedToolStatus.available.length ? selectedToolStatus.available.join('、') : '本场景不使用业务工具。' }}</p><p v-if="catalogReady && selectedToolStatus.unknown.length" class="unknown-summary">待修正：{{ selectedToolStatus.unknown.join('、') }}</p><p v-else-if="catalogError">工具目录暂不可用，无法核对当前配置。<button type="button" :disabled="catalogLoading" @click="loadToolCatalog">重试</button></p></section>
           </div>
           <section class="workflow"><label>处理指引（供模型参考）</label><ol><li v-for="(step, index) in selected.process" :key="`${index}-${step}`"><span>{{ String(index + 1).padStart(2, '0') }}</span><strong>{{ step }}</strong></li></ol><p>模型会按具体问题选择适用步骤；这些步骤不会自动执行操作。</p></section>
@@ -32,7 +32,7 @@
         <form v-else class="scenario-form" @submit.prevent="saveScenario">
           <div class="form-heading">
             <div><span>EDIT / {{ selected.code.toUpperCase() }}</span><h2>编辑场景配置</h2><p>保存后，展示信息和该场景后续的新回答都会使用这份配置。</p></div>
-            <div class="form-actions"><button type="button" :disabled="saving" @click="cancelEdit">取消</button><button class="primary" type="submit" :disabled="saving || loading || !scenariosReady || !catalogReady || validationErrors.length">{{ saving ? '保存中…' : '保存配置' }}</button></div>
+            <div class="form-actions"><button type="button" :disabled="saving" @click="cancelEdit">取消</button><button class="primary" type="submit" :disabled="saving || loading || !scenariosReady || !catalogReady || !knowledgeReady || validationErrors.length">{{ saving ? '保存中…' : '保存配置' }}</button></div>
           </div>
 
           <div class="form-grid">
@@ -40,6 +40,25 @@
             <label><span>会话短名称</span><input v-model.trim="draft.shortName" maxlength="40" required></label>
             <label class="wide"><span>场景说明</span><textarea v-model.trim="draft.summary" rows="3" maxlength="500" required></textarea><small>{{ draft.summary.length }}/500</small></label>
             <label><span>知识策略</span><select v-model="draft.knowledgeMode" required><option value="可选">可选</option><option value="推荐">推荐</option><option value="必选">必选</option></select></label>
+            <section class="wide editor-section" aria-labelledby="knowledge-heading">
+              <div class="section-heading"><div><h3 id="knowledge-heading">场景知识范围</h3><p>可用范围限制此场景能选择哪些库；默认库只在新会话创建时预选。会话仍可在范围内调整，最多选择 3 个。</p></div></div>
+              <p v-if="knowledgeLoading" class="editor-state" role="status">正在加载知识库…</p>
+              <p v-else-if="knowledgeError" class="editor-state error" role="alert">知识库列表加载失败：{{ knowledgeError }} <button type="button" @click="loadKnowledgeBases">重试</button></p>
+              <template v-else>
+                <label class="knowledge-scope-toggle"><input v-model="draft.restrictKnowledgeBases" type="checkbox" :disabled="saving" @change="onKnowledgeRestrictionChange"><span>限定此场景可用的知识库</span></label>
+                <p class="empty-note">{{ draft.restrictKnowledgeBases ? '勾选至少一个可用库；未勾选的库不会出现在该场景的会话选择中。' : '当前可使用所有有权访问的知识库。' }}</p>
+                <div v-if="knowledgeBases.length" class="knowledge-options">
+                  <div v-for="base in knowledgeBases" :key="base.id" class="knowledge-option">
+                    <strong>{{ base.name }}</strong>
+                    <label v-if="draft.restrictKnowledgeBases"><input v-model="draft.allowedKnowledgeBaseIds" type="checkbox" :value="base.id" :disabled="saving" @change="onAllowedKnowledgeChange"><span>可用</span></label>
+                    <label><input v-model="draft.defaultKnowledgeBaseIds" type="checkbox" :value="base.id" :disabled="saving || (draft.restrictKnowledgeBases && !draft.allowedKnowledgeBaseIds.includes(base.id)) || (draft.defaultKnowledgeBaseIds.length >= 3 && !draft.defaultKnowledgeBaseIds.includes(base.id))"><span>新会话默认</span></label>
+                  </div>
+                </div>
+                <div v-if="missingKnowledgeIds.length" class="unknown-tools" role="alert"><strong>历史配置中有不可访问或已删除的知识库，保存前请移除</strong><div v-for="id in missingKnowledgeIds" :key="id"><span>{{ id }}</span><button type="button" :disabled="saving" @click="removeMissingKnowledgeBase(id)">移除</button></div></div>
+                <p v-if="!knowledgeBases.length" class="empty-note">暂无知识库。可先保存不限定范围的场景，随后到知识中心创建知识库。</p>
+                <p class="empty-note">已设 {{ draft.defaultKnowledgeBaseIds.length }}/3 个默认库。{{ draft.knowledgeMode === '必选' ? '必选场景会阻止用户在未选知识库时创建会话。' : '默认不选时，新会话可使用普通聊天。' }}</p>
+              </template>
+            </section>
             <section class="wide editor-section" aria-labelledby="tools-heading">
               <div class="section-heading"><div><h3 id="tools-heading">允许的业务工具</h3><p>选择本场景可调用的能力；实际使用还取决于账号权限、必要信息和 AI 服务状态。留空表示不使用业务工具。</p></div><span class="section-count">已选 {{ draft.toolIds.length }} 项</span></div>
               <p v-if="catalogLoading" class="editor-state" role="status">正在加载可用工具…</p>
@@ -68,7 +87,7 @@
             </section>
             <label class="wide"><span>业务边界</span><textarea v-model.trim="draft.guardrail" rows="4" maxlength="1000" required></textarea><small>{{ draft.guardrail.length }}/1000</small></label>
           </div>
-          <div class="config-summary"><div><h3>保存前确认</h3><p>知识库{{ draft.knowledgeMode }} · {{ draft.toolIds.length }} 个业务工具 · {{ draft.steps.length }} 个处理步骤</p><p v-if="draft.toolIds.length">已选工具：{{ chosenTools.map(tool => tool.label).join('、') }}</p><p v-else>本场景不使用业务工具。</p></div><button class="primary" type="submit" :disabled="saving || loading || !scenariosReady || !catalogReady || validationErrors.length">{{ saving ? '保存中…' : '保存配置' }}</button></div>
+          <div class="config-summary"><div><h3>保存前确认</h3><p>知识库{{ draft.knowledgeMode }} · {{ draft.restrictKnowledgeBases ? draft.allowedKnowledgeBaseIds.length + ' 个可用库' : '不限可用库' }} · {{ draft.defaultKnowledgeBaseIds.length }} 个默认库 · {{ draft.toolIds.length }} 个业务工具 · {{ draft.steps.length }} 个处理步骤</p><p v-if="draft.toolIds.length">已选工具：{{ chosenTools.map(tool => tool.label).join('、') }}</p><p v-else>本场景不使用业务工具。</p></div><button class="primary" type="submit" :disabled="saving || loading || !scenariosReady || !catalogReady || !knowledgeReady || validationErrors.length">{{ saving ? '保存中…' : '保存配置' }}</button></div>
           <ul v-if="validationErrors.length && !catalogLoading" class="validation-list" role="alert"><li v-for="error in validationErrors" :key="error">{{ error }}</li></ul>
         </form>
       </article>
@@ -81,7 +100,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { ArrowDownIcon, ArrowUpIcon, PencilSquareIcon, PlusIcon, ShieldCheckIcon, TrashIcon } from '@heroicons/vue/24/outline'
 import { defaultProcessForScenario, mergeScenario, mergeScenarios, scenarios, scenarioByCode } from '../data/scenarios'
-import { scenarioAPI } from '../services/api'
+import { knowledgeAPI, scenarioAPI } from '../services/api'
 import { authState } from '../services/auth'
 
 const route = useRoute()
@@ -99,10 +118,21 @@ const catalogReady = ref(false)
 const catalogError = ref('')
 const toolCatalog = ref([])
 const toolWarning = ref('')
+const knowledgeBases = ref([])
+const knowledgeLoading = ref(false)
+const knowledgeReady = ref(false)
+const knowledgeError = ref('')
 let stepSequence = 0
-const draft = reactive({ name: '', shortName: '', summary: '', knowledgeMode: '可选', toolIds: [], unknownTools: [], steps: [], guardrail: '' })
+const draft = reactive({ name: '', shortName: '', summary: '', knowledgeMode: '可选', restrictKnowledgeBases: false, allowedKnowledgeBaseIds: [], defaultKnowledgeBaseIds: [], toolIds: [], unknownTools: [], steps: [], guardrail: '' })
 const canEdit = computed(() => authState.user?.role === 'ADMIN')
 const chosenTools = computed(() => toolCatalog.value.filter(tool => draft.toolIds.includes(tool.id)))
+const missingKnowledgeIds = computed(() => {
+  const known = new Set(knowledgeBases.value.map(base => base.id))
+  return [...new Set([...draft.allowedKnowledgeBaseIds, ...draft.defaultKnowledgeBaseIds])].filter(id => !known.has(id))
+})
+const knowledgeName = id => knowledgeBases.value.find(base => base.id === id)?.name || id
+const selectedKnowledgeScope = computed(() => selected.value.allowedKnowledgeBaseIds?.length ? selected.value.allowedKnowledgeBaseIds.map(knowledgeName).join('、') : '所有可访问的知识库')
+const selectedKnowledgeDefaults = computed(() => selected.value.defaultKnowledgeBaseIds?.length ? selected.value.defaultKnowledgeBaseIds.map(knowledgeName).join('、') : '不预选')
 
 const selectedToolStatus = computed(() => {
   const { ids, unknown } = resolveTools(selected.value.tools)
@@ -115,6 +145,12 @@ const validationErrors = computed(() => {
   const errors = []
   if (!scenariosReady.value) errors.push('场景配置尚未同步，暂不能保存。')
   if (!catalogReady.value) errors.push('工具目录尚未加载，暂不能保存。')
+  if (!knowledgeReady.value) errors.push('知识库列表尚未加载，暂不能保存。')
+  if (draft.restrictKnowledgeBases && !draft.allowedKnowledgeBaseIds.length) errors.push('限定知识范围时，至少选择一个可用知识库。')
+  if (draft.defaultKnowledgeBaseIds.length > 3) errors.push('默认知识库最多选择 3 个。')
+  if (draft.restrictKnowledgeBases && draft.defaultKnowledgeBaseIds.some(id => !draft.allowedKnowledgeBaseIds.includes(id))) errors.push('默认知识库必须在可用范围内。')
+  const knownBases = new Set(knowledgeBases.value.map(base => base.id))
+  if (draft.allowedKnowledgeBaseIds.some(id => !knownBases.has(id)) || draft.defaultKnowledgeBaseIds.some(id => !knownBases.has(id))) errors.push('知识范围包含已删除或不可访问的知识库，请调整后保存。')
   if (draft.unknownTools.length) errors.push('请移除历史配置中不可用的业务工具。')
   if (!draft.steps.length) errors.push('处理指引至少保留 1 个步骤。')
   if (draft.steps.length > 20) errors.push('处理指引最多 20 个步骤。')
@@ -138,7 +174,7 @@ const validationErrors = computed(() => {
 const knowledgeDescription = computed(() => ({
   可选: '可以直接进行普通对话，也可以选择知识库增强回答。',
   推荐: '建议绑定对应业务知识库，资料不足时仍可进入人工或工单流程。',
-  必选: '必须选择知识库，所有回答都需要可追溯引用。'
+  必选: '必须选择知识库，回答会在所选范围内检索并展示可用来源。'
 })[selected.value.knowledgeMode] || '按场景配置选择知识范围。')
 
 watch(() => route.query.scenario, code => {
@@ -168,7 +204,7 @@ watch(
 )
 onMounted(async () => {
   loading.value = true
-  const [scenariosResult] = await Promise.allSettled([scenarioAPI.list(), loadToolCatalog()])
+  const [scenariosResult] = await Promise.allSettled([scenarioAPI.list(), loadToolCatalog(), loadKnowledgeBases()])
   try {
     if (scenariosResult.status === 'rejected') throw scenariosResult.reason
     if (!Array.isArray(scenariosResult.value) || !scenariosResult.value.length) throw new Error('未返回场景配置')
@@ -220,6 +256,9 @@ function fillDraft() {
     shortName: selected.value.shortName,
     summary: selected.value.summary,
     knowledgeMode: selected.value.knowledgeMode,
+    restrictKnowledgeBases: Boolean(selected.value.allowedKnowledgeBaseIds?.length),
+    allowedKnowledgeBaseIds: [...(selected.value.allowedKnowledgeBaseIds || [])],
+    defaultKnowledgeBaseIds: [...(selected.value.defaultKnowledgeBaseIds || [])],
     toolIds: ids,
     unknownTools: unknown,
     steps: selected.value.process.map(text => makeStep(text)),
@@ -303,6 +342,36 @@ async function loadToolCatalog() {
   }
 }
 
+async function loadKnowledgeBases() {
+  knowledgeLoading.value = true
+  knowledgeReady.value = false
+  knowledgeError.value = ''
+  try {
+    const items = await knowledgeAPI.list()
+    if (!Array.isArray(items)) throw new Error('返回数据格式不正确')
+    knowledgeBases.value = items
+    knowledgeReady.value = true
+  } catch (error) {
+    knowledgeError.value = error.message || '请稍后重试'
+  } finally {
+    knowledgeLoading.value = false
+  }
+}
+
+function onKnowledgeRestrictionChange() {
+  if (!draft.restrictKnowledgeBases) draft.allowedKnowledgeBaseIds = []
+  else draft.allowedKnowledgeBaseIds = [...new Set([...draft.allowedKnowledgeBaseIds, ...draft.defaultKnowledgeBaseIds])]
+}
+
+function onAllowedKnowledgeChange() {
+  draft.defaultKnowledgeBaseIds = draft.defaultKnowledgeBaseIds.filter(id => draft.allowedKnowledgeBaseIds.includes(id))
+}
+
+function removeMissingKnowledgeBase(id) {
+  draft.allowedKnowledgeBaseIds = draft.allowedKnowledgeBaseIds.filter(value => value !== id)
+  draft.defaultKnowledgeBaseIds = draft.defaultKnowledgeBaseIds.filter(value => value !== id)
+}
+
 function makeStep(text = '') {
   return { id: ++stepSequence, text: String(text || '') }
 }
@@ -375,6 +444,8 @@ async function saveScenario() {
       shortName: draft.shortName.trim(),
       summary: draft.summary.trim(),
       knowledgeMode: draft.knowledgeMode,
+      allowedKnowledgeBaseIds: draft.restrictKnowledgeBases ? [...draft.allowedKnowledgeBaseIds] : [],
+      defaultKnowledgeBaseIds: [...draft.defaultKnowledgeBaseIds],
       tools: [...draft.toolIds],
       process: draft.steps.map(step => step.text.trim()),
       guardrail: draft.guardrail.trim()
@@ -404,6 +475,7 @@ function showMessage(message, type) {
 .policy-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:20px 0}.policy-grid section,.workflow{padding:17px;background:var(--surface-subtle);border-radius:8px}label{display:block;margin-bottom:8px;color:var(--text-soft);font-size:11px;font-weight:750;letter-spacing:.1em;text-transform:uppercase}.policy-grid strong{font-size:15px}.policy-grid p{margin:7px 0 0;color:var(--text-muted);font-size:12px;line-height:1.65}.workflow ol{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin:0;padding:0;list-style:none}.workflow li{min-height:84px;padding:13px;background:var(--surface);border:1px solid var(--border-color);border-radius:8px}.workflow li span{display:block;color:var(--primary);font-size:11px}.workflow li strong{display:block;margin-top:15px;font-size:13px}.guardrail{display:flex;gap:12px;margin-top:12px;padding:17px;color:var(--success);background:var(--success-soft);border-radius:8px}.guardrail svg{width:21px;flex:none}.guardrail label{color:inherit}.guardrail p{margin:0;color:var(--text-color);font-size:13px}
 .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px 16px;padding-top:24px}.form-grid label{position:relative;margin:0;color:var(--text-muted);font-size:12px;letter-spacing:0;text-transform:none}.form-grid label>span{display:block;margin-bottom:8px;color:var(--text-color);font-size:13px}.form-grid .wide{grid-column:1/-1}.form-grid input,.form-grid select,.form-grid textarea{width:100%;padding:10px 11px;color:var(--text-color);background:var(--surface-subtle);border:1px solid var(--border-color);border-radius:8px;outline:0}.form-grid input,.form-grid select{height:42px}.form-grid textarea{resize:vertical;line-height:1.65}.form-grid input:focus,.form-grid select:focus,.form-grid textarea:focus{border-color:var(--primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--primary) 12%,transparent)}.form-grid small{display:block;margin-top:6px;color:var(--text-soft);font-size:11px;font-weight:400;line-height:1.5}
 .editor-section{min-width:0;padding:18px;background:var(--surface-subtle);border:1px solid var(--border-color);border-radius:10px}
+.knowledge-scope-toggle,.knowledge-option label{display:flex!important;align-items:center;gap:7px;cursor:pointer}.knowledge-scope-toggle input,.knowledge-option input{width:16px!important;height:16px!important;flex:none;margin:0;accent-color:var(--primary)}.knowledge-scope-toggle span,.knowledge-option label span{margin:0!important;font-size:12px!important}.knowledge-options{display:grid;gap:8px;margin-top:12px}.knowledge-option{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:10px 12px;background:var(--surface);border:1px solid var(--border-color);border-radius:7px}.knowledge-option>strong{min-width:150px;flex:1;font-size:12px}.knowledge-option label{margin:0!important}.knowledge-option label:has(input:disabled){opacity:.5}
 .policy-grid p.unknown-summary{color:var(--danger)}
 .policy-grid button{margin-left:6px;padding:0;color:var(--primary);background:none;border:0;font-size:12px;cursor:pointer}
 .page-message button{margin-left:8px;padding:2px 7px;color:inherit;background:none;border:1px solid currentColor;border-radius:5px;font-size:12px;cursor:pointer}

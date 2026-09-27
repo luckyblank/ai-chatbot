@@ -25,6 +25,15 @@ test('does not merge different documents that happen to share a file name', () =
   assert.equal(groups.length, 2)
 })
 
+test('separates identical document identifiers from different knowledge bases', () => {
+  const groups = groupCitations([
+    { knowledgeBaseId: 'base-a', documentId: 'doc-1', fileName: '制度.md', excerpt: 'A' },
+    { knowledgeBaseId: 'base-b', documentId: 'doc-1', fileName: '制度.md', excerpt: 'B' }
+  ])
+  assert.equal(groups.length, 2)
+  assert.deepEqual(groups.map(group => group.knowledgeBaseId), ['base-a', 'base-b'])
+})
+
 test('shows only sources actually cited by the answer and keeps original numbering', () => {
   const citations = [
     { documentId: 'doc-a', chunkId: 'chunk-1', excerpt: '候选一' },

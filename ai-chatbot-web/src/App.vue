@@ -12,6 +12,7 @@ import SidebarPanelIcon from './components/icons/SidebarPanelIcon.vue'
 import SupportWidget from './components/SupportWidget.vue'
 import AccountMenu from './components/AccountMenu.vue'
 import { mergeScenarioToolCatalog, mergeScenarios, scenarios } from './data/scenarios'
+import { knowledgeBaseIdsFor } from './services/knowledgeSelection'
 import { authAPI, conversationAPI, knowledgeAPI, scenarioAPI, workflowAPI } from './services/api'
 import { authState, clearAuthenticatedUser } from './services/auth'
 import { aiStatusState, describeAiStatus, refreshAiStatus, resetAiStatus } from './services/aiStatus'
@@ -76,7 +77,7 @@ async function openSearch() {
       try { return await knowledgeAPI.documents(base.id) } catch { return [] }
     }))
     dynamicSearchItems.value = [
-      ...sessions.map(item => ({ type: '会话', title: item.title || '新对话', subtitle: item.knowledgeBaseId ? '知识增强会话' : '普通会话', to: `/customer-service?conversation=${item.id}` })),
+      ...sessions.map(item => ({ type: '会话', title: item.title || '新对话', subtitle: knowledgeBaseIdsFor(item).length ? `${knowledgeBaseIdsFor(item).length} 个知识库 · 知识增强会话` : '普通会话', to: `/customer-service?conversation=${item.id}` })),
       ...bases.map(item => ({ type: '知识库', title: item.name, subtitle: item.description || '企业知识库', to: `/knowledge-bases?knowledge=${item.id}` })),
       ...documentGroups.flat().map(item => ({ type: '文档', title: item.fileName, subtitle: '查看原文与分词片段', to: `/knowledge-bases?knowledge=${item.knowledgeBaseId}&document=${item.id}` })),
       ...workflows.map(item => ({ type: '工作流', title: item.name, subtitle: item.description, to: `/workflows?workflow=${item.id}` }))

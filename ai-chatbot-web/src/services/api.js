@@ -183,8 +183,9 @@ export const conversationAPI = {
     const query = knowledgeBaseId ? `?knowledgeBaseId=${encodeURIComponent(knowledgeBaseId)}` : ''
     return request(`/api/v1/conversations${query}`)
   },
-  create: (knowledgeBaseId, title = '新对话', scenarioCode = 'general') => request('/api/v1/conversations', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ knowledgeBaseId, title, scenarioCode })
+  create: (knowledgeBaseIds, title = '新对话', scenarioCode = 'general') => request('/api/v1/conversations', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...(Array.isArray(knowledgeBaseIds) ? { knowledgeBaseIds } : { knowledgeBaseId: knowledgeBaseIds }), title, scenarioCode })
   }),
   get: (id) => request(`/api/v1/conversations/${id}`),
   rename: (id, title) => request(`/api/v1/conversations/${id}`, {

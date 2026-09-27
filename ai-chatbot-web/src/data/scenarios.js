@@ -63,7 +63,7 @@ const defaultScenarios = [
   }
 ]
 
-export const scenarios = reactive(defaultScenarios.map(item => ({ ...item })))
+export const scenarios = reactive(defaultScenarios.map(item => ({ ...item, allowedKnowledgeBaseIds: [], defaultKnowledgeBaseIds: [] })))
 
 // The server catalog is the source of truth for configurable tools. This small
 // label fallback keeps existing pages readable before the catalog has loaded.
@@ -148,6 +148,8 @@ export function mergeScenarios(items) {
     const existing = scenarios.find(scenario => scenario.code === item.code)
     const normalized = {
       ...item,
+      allowedKnowledgeBaseIds: Array.isArray(item.allowedKnowledgeBaseIds) ? item.allowedKnowledgeBaseIds : [],
+      defaultKnowledgeBaseIds: Array.isArray(item.defaultKnowledgeBaseIds) ? item.defaultKnowledgeBaseIds : [],
       tools: Array.isArray(item.tools) ? item.tools : [],
       process: Array.isArray(item.process) ? item.process : [],
       sortOrder: Number.isFinite(item.sortOrder) ? item.sortOrder : index

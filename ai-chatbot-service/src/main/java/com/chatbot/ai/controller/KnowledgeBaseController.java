@@ -3,12 +3,14 @@ package com.chatbot.ai.controller;
 import com.chatbot.ai.domain.knowledge.KnowledgeBase;
 import com.chatbot.ai.domain.knowledge.KnowledgeDocument;
 import com.chatbot.ai.domain.knowledge.KnowledgeChunk;
+import com.chatbot.ai.domain.scenario.ScenarioDefinition;
 import com.chatbot.ai.repository.KnowledgeCatalogRepository;
 import com.chatbot.ai.repository.KnowledgeChunkRepository;
 import com.chatbot.ai.domain.vo.CreateKnowledgeBaseRequest;
 import com.chatbot.ai.domain.vo.UpdateKnowledgeBaseRequest;
 import com.chatbot.ai.service.KnowledgeBaseService;
 import com.chatbot.ai.service.KnowledgeIngestionService;
+import com.chatbot.ai.service.ScenarioService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -26,6 +28,7 @@ import org.springframework.web.multipart.MultipartFile;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.core.io.FileSystemResource;
 import java.nio.charset.StandardCharsets;
 
@@ -39,6 +42,7 @@ public class KnowledgeBaseController {
     private final KnowledgeIngestionService ingestionService;
     private final KnowledgeCatalogRepository catalogRepository;
     private final KnowledgeChunkRepository chunkRepository;
+    private final ScenarioService scenarioService;
 
     @GetMapping
     public List<KnowledgeBase> list() {
@@ -66,10 +70,26 @@ public class KnowledgeBaseController {
     @DeleteMapping("/{knowledgeBaseId}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void delete(@PathVariable String knowledgeBaseId) {
+        knowledgeBaseService.getKnowledgeBase(knowledgeBaseId);
+        List<String> dependentScenarios = scenarioService.list().stream()
+                .filter(scenario -> referencesKnowledgeBase(scenario, knowledgeBaseId))
+                .map(scenario -> scenario.getName() + "（" + scenario.getCode() + "）")
+                .toList();
+        if (!dependentScenarios.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "知识库被场景引用，请先从以下场景的可用或默认知识库中移除：" + String.join("、", dependentScenarios));
+        }
         for (KnowledgeDocument document : knowledgeBaseService.listDocuments(knowledgeBaseId)) {
             ingestionService.deleteVectors(document);
         }
         knowledgeBaseService.deleteKnowledgeBase(knowledgeBaseId);
+    }
+
+    private boolean referencesKnowledgeBase(ScenarioDefinition scenario, String knowledgeBaseId) {
+        return (scenario.getAllowedKnowledgeBaseIds() != null
+                && scenario.getAllowedKnowledgeBaseIds().contains(knowledgeBaseId))
+                || (scenario.getDefaultKnowledgeBaseIds() != null
+                && scenario.getDefaultKnowledgeBaseIds().contains(knowledgeBaseId));
     }
 
     @GetMapping("/{knowledgeBaseId}/documents")

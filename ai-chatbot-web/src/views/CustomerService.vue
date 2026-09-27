@@ -55,15 +55,15 @@
       <header class="conversation-toolbar">
         <button ref="mobileSessionTrigger" class="mobile-session-trigger" type="button" aria-controls="conversation-drawer" :aria-expanded="mobileSessionsOpen" @click="openMobileSessions"><ChatBubbleLeftRightIcon /><span>会话列表</span><small>{{ filteredConversations.length }}</small></button>
         <label><span>业务场景</span><select v-model="selectedScenarioCode" :disabled="sending" @change="changeScenario"><option v-for="item in scenarios" :key="item.code" :value="item.code">{{ item.name }}</option></select></label>
-        <label><span>知识范围</span><select v-model="selectedKnowledgeBaseId" :disabled="loadingKnowledgeBases || sending" @change="changeKnowledgeBase"><option value="">不使用知识库 · 普通聊天</option><option v-for="item in knowledgeBases" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
-        <div class="mode-state"><span :class="{ rag: selectedKnowledgeBaseId }"></span><strong>{{ selectedKnowledgeBaseId ? 'RAG 已启用' : '普通对话' }}</strong></div>
+        <div class="knowledge-picker-wrap"><span class="toolbar-label">知识范围</span><details class="knowledge-picker"><summary :aria-label="`知识范围：${knowledgeSelectionLabel}`"><span>{{ loadingKnowledgeBases ? '正在加载知识库…' : knowledgeSelectionLabel }}</span></summary><div class="knowledge-picker-menu"><p>最多选 3 个知识库；仅检索所选库中已完成索引的文档，其他库会跳过。</p><p v-if="hasUnavailableSelection" class="knowledge-picker-warning">原会话所选知识库已不在此场景可用范围内，请重新选择。</p><label v-for="item in availableKnowledgeBases" :key="item.id"><input type="checkbox" :checked="selectedKnowledgeBaseIds.includes(item.id)" :disabled="sending || (!selectedKnowledgeBaseIds.includes(item.id) && effectiveSelectedKnowledgeBaseIds.length >= 3)" @change="toggleKnowledgeBase(item.id, $event)"><span>{{ item.name }}</span></label><p v-if="!availableKnowledgeBases.length">当前场景暂无可用知识库。</p><button v-if="selectedScenario.knowledgeMode !== '必选' && selectedKnowledgeBaseIds.length" type="button" :disabled="sending" @click="clearKnowledgeBases">改为普通聊天</button><p v-if="selectedScenario.knowledgeMode === '必选'">此场景至少需要选择一个知识库。</p></div></details></div>
+        <div class="mode-state"><span :class="{ rag: selectedKnowledgeBaseIds.length }"></span><strong>{{ selectedKnowledgeBaseIds.length ? `已选 ${selectedKnowledgeBaseIds.length} 库` : selectedScenario.knowledgeMode === '必选' ? '待选知识库' : '普通对话' }}</strong></div>
       </header>
 
       <div ref="messageArea" class="messages">
         <div v-if="messages.length === 0" class="conversation-empty">
           <span class="mode-label">{{ selectedScenario.name }}</span>
-          <h1>{{ selectedKnowledgeBaseId ? '基于企业知识开始对话' : '直接开始一次智能对话' }}</h1>
-          <p>{{ selectedKnowledgeBaseId ? `回答将从“${currentKnowledgeBase?.name}”检索依据，并展示引用与完整链路。` : '当前未选择知识库，问题会直接交给模型，不执行向量检索。' }}</p>
+          <h1>{{ selectedKnowledgeBaseIds.length ? '基于企业知识开始对话' : '直接开始一次智能对话' }}</h1>
+          <p>{{ selectedKnowledgeBaseIds.length ? `回答将从${knowledgeSelectionLabel}中已完成索引的文档检索依据，并展示引用与完整链路。` : selectedScenario.knowledgeMode === '必选' ? '此场景必须先选择至少一个知识库。' : '当前未选择知识库，问题会直接交给模型，不执行向量检索。' }}</p>
           <div class="starter-grid"><button v-for="prompt in starterPromptsForScenario(selectedScenario.code)" :key="prompt" @click="input = prompt"><ArrowUpRightIcon />{{ prompt }}</button></div>
         </div>
 
@@ -89,7 +89,7 @@
                   <summary><span><CommandLineIcon />链路追溯</span><small>{{ message.traces.length }} 个步骤</small></summary>
                   <ol class="trace-list"><li v-for="(step, traceIndex) in message.traces" :key="traceIndex" :class="step.status"><span class="trace-dot"></span><div><div class="trace-heading"><span class="phase-badge">{{ tracePhaseLabel(step.phase) }}</span><strong>{{ step.title }}</strong><time v-if="step.durationMs !== null && step.durationMs !== undefined">{{ step.durationMs }} ms</time></div><p>{{ step.detail }}</p></div></li></ol>
                 </details>
-                <CitationSources v-if="message.citations?.length" :citations="message.citations" :answer="message.content" :knowledge-base-id="selectedKnowledgeBaseId" />
+                <CitationSources v-if="message.citations?.length" :citations="message.citations" :answer="message.content" :knowledge-base-id="selectedKnowledgeBaseIds.length === 1 ? selectedKnowledgeBaseIds[0] : ''" :knowledge-bases="knowledgeBases" />
                 <div v-if="message.interrupted" class="message-interruption" role="alert"><ExclamationCircleIcon /><span>回答中断：{{ message.interruptionMessage || '连接已断开' }}。可重新生成或同步会话后继续。</span><button type="button" :disabled="sending" @click="retryInterruptedAnswer(index)">重新生成</button><button type="button" :disabled="sending" @click="discardInterruptedAnswer">同步并继续</button></div>
             </div>
             <div v-if="!message.streaming && message.content" class="message-actions" :aria-label="`${message.role === 'user' ? '用户消息' : 'AI 回复'}操作`">
@@ -129,10 +129,10 @@
         </div>
         <input ref="fileInput" class="file-input" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md,.markdown" @change="selectAttachments">
         <button class="attach-button" type="button" title="添加附件" aria-label="添加附件" @click="fileInput?.click()"><PaperClipIcon /></button>
-        <textarea ref="composerTextarea" v-model="input" rows="1" :disabled="sending" :placeholder="editingMessageIndex >= 0 ? '修改这条消息' : selectedScenarioCode === 'commerce-support' ? '描述售后问题；可提供客户编号或订单号' : '输入问题；知识库为可选项'" @keydown.enter.exact.prevent="sendMessage" @paste="onAttachmentPaste"></textarea>
+        <textarea ref="composerTextarea" v-model="input" rows="1" :disabled="sending" :placeholder="editingMessageIndex >= 0 ? '修改这条消息' : selectedScenarioCode === 'commerce-support' ? '描述售后问题；可提供客户编号或订单号' : selectedScenario.knowledgeMode === '必选' ? '先选择知识库，再输入问题' : '输入问题；可按需选择知识库'" @keydown.enter.exact.prevent="sendMessage" @paste="onAttachmentPaste"></textarea>
         <button v-if="hasStreamingMessage" class="send-button stop-button" type="button" title="停止生成" aria-label="停止生成" @click="stopGeneration">停止</button>
         <button v-else class="send-button" type="submit" :aria-label="editingMessageIndex >= 0 ? '发送修改后的消息' : '发送消息'" :disabled="!input.trim() || sending"><PaperAirplaneIcon /></button>
-        <div class="composer-foot"><span>{{ editingMessageIndex >= 0 ? 'Enter 重新发送 · Esc 取消编辑' : 'Enter 发送 · Shift + Enter 换行' }}</span><span>{{ selectedKnowledgeBaseId ? '知识增强' : '普通模型' }} · {{ selectedScenario.shortName }}</span></div>
+        <div class="composer-foot"><span>{{ editingMessageIndex >= 0 ? 'Enter 重新发送 · Esc 取消编辑' : 'Enter 发送 · Shift + Enter 换行' }}</span><span>{{ selectedKnowledgeBaseIds.length ? '知识增强' : selectedScenario.knowledgeMode === '必选' ? '待选知识库' : '普通模型' }} · {{ selectedScenario.shortName }}</span></div>
         <div v-if="draggingFiles" class="composer-drop-hint" aria-hidden="true">松开以添加附件</div>
       </form>
     </section>
@@ -144,7 +144,7 @@
         <section><label>当前场景</label><h2>{{ selectedScenario.name }}</h2><p>{{ selectedScenario.summary }}</p></section>
         <section><label>处理指引</label><ol class="process-list"><li v-for="(step, index) in selectedScenario.process" :key="step"><span>{{ index + 1 }}</span>{{ step }}</li></ol><p>按当前问题选择适用步骤，实际执行情况请查看链路追溯。</p></section>
         <section><label>已配置业务工具</label><div v-if="configuredToolLabels(selectedScenario.tools).length" class="tool-list"><span v-for="tool in configuredToolLabels(selectedScenario.tools)" :key="tool"><WrenchScrewdriverIcon />{{ tool }}</span></div><p v-else>该场景不开放业务工具。</p><p v-if="unrecognizedToolCount(selectedScenario.tools)">另有 {{ unrecognizedToolCount(selectedScenario.tools) }} 项历史工具不可用，请联系管理员修正。</p><p v-if="selectedScenarioCode === 'commerce-support'">可用客户编号查询其订单；客服登录账号 ID 不能代替客户编号。</p></section>
-        <section><label>知识上下文</label><div class="knowledge-context"><CircleStackIcon /><span><strong>{{ currentKnowledgeBase?.name || '未选择知识库' }}</strong><small>{{ currentKnowledgeBase ? '回答将执行向量检索' : '当前为普通聊天模式' }}</small></span></div><RouterLink class="manage-knowledge" :to="selectedKnowledgeBaseId ? { path: '/knowledge-bases', query: { knowledge: selectedKnowledgeBaseId } } : '/knowledge-bases'">进入知识中心</RouterLink></section>
+        <section><label>知识上下文</label><div class="knowledge-context"><CircleStackIcon /><span><strong>{{ knowledgeSelectionLabel }}</strong><small>{{ selectedKnowledgeBaseIds.length ? '仅检索已完成索引的文档' : '当前为普通聊天模式' }}</small></span></div><RouterLink class="manage-knowledge" :to="selectedKnowledgeBaseIds.length ? { path: '/knowledge-bases', query: { knowledge: selectedKnowledgeBaseIds[0] } } : '/knowledge-bases'">进入知识中心</RouterLink></section>
         <section class="guardrail"><ShieldCheckIcon /><div><label>业务边界</label><p>{{ selectedScenario.guardrail }}</p></div></section>
       </div>
     </aside>
@@ -174,16 +174,17 @@ import CitationSources from '../components/CitationSources.vue'
 import ImagePreview from '../components/ImagePreview.vue'
 import PendingActionCard from '../components/PendingActionCard.vue'
 import PanelEdgeHandleIcon from '../components/icons/PanelEdgeHandleIcon.vue'
-import { configuredToolLabels, scenarios, scenarioByCode, starterPromptsForScenario, unrecognizedToolCount } from '../data/scenarios'
+import { configuredToolLabels, mergeScenarios, scenarios, scenarioByCode, starterPromptsForScenario, unrecognizedToolCount } from '../data/scenarios'
 import { authState } from '../services/auth'
-import { BASE_URL, conversationAPI, createRequestId, knowledgeAPI, pendingActionAPI } from '../services/api'
+import { BASE_URL, conversationAPI, createRequestId, knowledgeAPI, pendingActionAPI, scenarioAPI } from '../services/api'
+import { allowedKnowledgeBases as filterAllowedKnowledgeBases, knowledgeBaseIdsFor, knowledgeSelectionIssue } from '../services/knowledgeSelection'
 
 const route = useRoute()
 const router = useRouter()
 const knowledgeBases = ref([]), conversations = ref([]), messages = ref([]), attachments = ref([])
 const pendingActions = ref([])
 const actionBusy = reactive({}), actionErrors = reactive({})
-const selectedKnowledgeBaseId = ref(''), selectedScenarioCode = ref(scenarioByCode(route.query.scenario).code), currentConversationId = ref('')
+const selectedKnowledgeBaseIds = ref([]), selectedScenarioCode = ref(scenarioByCode(route.query.scenario).code), currentConversationId = ref('')
 const input = ref(''), notice = ref(''), conversationSearch = ref(''), previewImage = ref('')
 const sending = ref(false), uploadingAttachments = ref(false), loadingKnowledgeBases = ref(false), deleting = ref(false)
 const draggingFiles = ref(false)
@@ -199,12 +200,15 @@ const copiedMessageIndex = ref(-1)
 const messageArea = ref(null), fileInput = ref(null), composerTextarea = ref(null), renameTarget = ref(null), deleteTarget = ref(null), renameTitle = ref('')
 const mobileSessionTrigger = ref(null), mobileDrawerClose = ref(null)
 const selectedScenario = computed(() => scenarioByCode(selectedScenarioCode.value))
-const currentKnowledgeBase = computed(() => knowledgeBases.value.find(item => item.id === selectedKnowledgeBaseId.value))
+const availableKnowledgeBases = computed(() => filterAllowedKnowledgeBases(knowledgeBases.value, selectedScenario.value))
+const effectiveSelectedKnowledgeBaseIds = computed(() => selectedKnowledgeBaseIds.value.filter(id => availableKnowledgeBases.value.some(base => base.id === id)))
+const hasUnavailableSelection = computed(() => effectiveSelectedKnowledgeBaseIds.value.length !== selectedKnowledgeBaseIds.value.length)
+const knowledgeSelectionLabel = computed(() => hasUnavailableSelection.value ? '知识范围已变更，请重新选择' : selectedKnowledgeBaseIds.value.length ? selectedKnowledgeBaseIds.value.map(id => knowledgeBaseName(id)).join('、') : selectedScenario.value.knowledgeMode === '必选' ? '请选择至少一个知识库' : '不使用知识库 · 普通聊天')
 const scopedConversations = computed(() => {
   if (historyScope.value === 'all') return conversations.value
   return conversations.value.filter(item => {
     const scenarioMatches = (item.scenarioCode || 'general') === selectedScenarioCode.value
-    const knowledgeMatches = (item.knowledgeBaseId || '') === selectedKnowledgeBaseId.value
+    const knowledgeMatches = JSON.stringify(knowledgeBaseIdsFor(item).sort()) === JSON.stringify([...selectedKnowledgeBaseIds.value].sort())
     return scenarioMatches && knowledgeMatches
   })
 })
@@ -297,6 +301,7 @@ watch(() => queryValue(route.query.scenario), code => {
   if (currentConversationId.value && nextScenarioCode !== selectedScenarioCode.value) {
     activeStreamController?.abort()
     selectedScenarioCode.value = nextScenarioCode
+    selectedKnowledgeBaseIds.value = scenarioDefaults(selectedScenario.value)
     conversationRequestVersion += 1
     currentConversationId.value = ''
     messages.value = []
@@ -304,13 +309,17 @@ watch(() => queryValue(route.query.scenario), code => {
     return
   }
   selectedScenarioCode.value = nextScenarioCode
+  if (!currentConversationId.value) selectedKnowledgeBaseIds.value = scenarioDefaults(selectedScenario.value)
 })
 
 async function loadWorkspace() {
   loadingKnowledgeBases.value = true
   try {
-    const [bases, sessions] = await Promise.all([knowledgeAPI.list(), conversationAPI.list()])
+    const [bases, sessions, scenarioItems] = await Promise.all([knowledgeAPI.list(), conversationAPI.list(), scenarioAPI.list()])
+    if (!Array.isArray(scenarioItems) || !scenarioItems.length) throw new Error('场景配置暂不可用')
+    mergeScenarios(scenarioItems)
     knowledgeBases.value = bases; conversations.value = sessions
+    if (!queryValue(route.query.conversation)) selectedKnowledgeBaseIds.value = scenarioDefaults(selectedScenario.value)
     workspaceLoaded.value = true
     await applyConversationRoute(queryValue(route.query.conversation))
   } catch (error) { notice.value = error.message } finally { loadingKnowledgeBases.value = false }
@@ -319,6 +328,7 @@ async function changeScenario() {
   conversationRequestVersion += 1
   currentConversationId.value = ''
   messages.value = []
+  selectedKnowledgeBaseIds.value = scenarioDefaults(selectedScenario.value)
   await closeMobileSessions()
   const query = { ...route.query, scenario: selectedScenarioCode.value }
   delete query.conversation
@@ -329,10 +339,38 @@ async function changeKnowledgeBase() {
   messages.value = []; currentConversationId.value = ''
   await clearConversationQuery()
 }
+function scenarioDefaults(scenario) {
+  const available = new Set(filterAllowedKnowledgeBases(knowledgeBases.value, scenario).map(base => base.id))
+  return (scenario.defaultKnowledgeBaseIds || []).filter(id => available.has(id)).slice(0, 3)
+}
+async function toggleKnowledgeBase(id, event) {
+  const available = new Set(availableKnowledgeBases.value.map(base => base.id))
+  const current = selectedKnowledgeBaseIds.value.filter(value => available.has(value))
+  const next = current.includes(id)
+    ? current.filter(value => value !== id)
+    : [...current, id]
+  if (selectedScenario.value.knowledgeMode === '必选' && !next.length) {
+    notice.value = '当前场景必须保留至少一个知识库。'
+    event.target.checked = true
+    return
+  }
+  const issue = knowledgeSelectionIssue(next, selectedScenario.value, knowledgeBases.value)
+  if (issue) { notice.value = issue; event.target.checked = current.includes(id); return }
+  selectedKnowledgeBaseIds.value = next
+  notice.value = ''
+  await changeKnowledgeBase()
+}
+async function clearKnowledgeBases() {
+  selectedKnowledgeBaseIds.value = []
+  await changeKnowledgeBase()
+}
 async function createConversation() {
   await closeMobileSessions()
+  if (!workspaceLoaded.value) { notice.value = '知识库与会话尚未加载，请稍后重试。'; return null }
+  const issue = knowledgeSelectionIssue(selectedKnowledgeBaseIds.value, selectedScenario.value, knowledgeBases.value)
+  if (issue) { notice.value = issue; return null }
   try {
-    const session = await conversationAPI.create(selectedKnowledgeBaseId.value, `${selectedScenario.value.shortName} · 新对话`, selectedScenarioCode.value)
+    const session = await conversationAPI.create([...selectedKnowledgeBaseIds.value], `${selectedScenario.value.shortName} · 新对话`, selectedScenarioCode.value)
     conversations.value = [session, ...conversations.value.filter(item => item.id !== session.id)]
     currentConversationId.value = session.id; messages.value = []
     await setConversationQuery(session.id, true, session.scenarioCode || selectedScenarioCode.value)
@@ -366,7 +404,7 @@ async function applyConversationRoute(id) {
     const session = await conversationAPI.get(requestedId)
     if (requestVersion !== conversationRequestVersion || queryValue(route.query.conversation) !== requestedId) return
     currentConversationId.value = session.id
-    selectedKnowledgeBaseId.value = session.knowledgeBaseId || ''
+    selectedKnowledgeBaseIds.value = knowledgeBaseIdsFor(session)
     selectedScenarioCode.value = session.scenarioCode || selectedScenarioCode.value
     messages.value = session.messages || []
     mergePendingActions(session.pendingActions)
@@ -381,7 +419,7 @@ async function applyConversationRoute(id) {
   } catch (error) {
     if (requestVersion !== conversationRequestVersion) return
     currentConversationId.value = ''
-    selectedKnowledgeBaseId.value = ''
+    selectedKnowledgeBaseIds.value = scenarioDefaults(selectedScenario.value)
     messages.value = []
     resetPendingActionState()
     if (error.status === 400 || error.status === 404) {
@@ -716,6 +754,8 @@ async function writeClipboardText(content) {
 }
 async function sendMessage() {
   const content = input.value.trim(); if (!content || sending.value) return
+  const knowledgeIssue = knowledgeSelectionIssue(selectedKnowledgeBaseIds.value, selectedScenario.value, knowledgeBases.value)
+  if (knowledgeIssue) { notice.value = knowledgeIssue + ' 请调整知识范围后继续。'; return }
   if (messages.value.some(message => message.interrupted)) { notice.value = '请先重新生成或同步中断的回答，再发送新消息。'; return }
   if (editingMessageIndex.value >= 0) { await resendEditedMessage(); return }
   const isFirstQuestion = !messages.value.some(message => message.role === 'user')
@@ -970,8 +1010,8 @@ function removeAttachment(index) { const [file] = attachments.value.splice(index
 function knowledgeBaseName(id) { return knowledgeBases.value.find(item => item.id === id)?.name || '知识问答' }
 function conversationMeta(session) {
   const scenarioName = scenarioByCode(session.scenarioCode || 'general').shortName
-  const knowledgeName = session.knowledgeBaseId ? knowledgeBaseName(session.knowledgeBaseId) : '普通对话'
-  return `${scenarioName} · ${knowledgeName}`
+  const names = knowledgeBaseIdsFor(session).map(knowledgeBaseName)
+  return `${scenarioName} · ${names.length ? names.join('、') : '普通对话'}`
 }
 function readCollapsedConversationGroups() {
   try {
@@ -1070,6 +1110,9 @@ function queueScrollToBottom() {
 .session-sidebar-content,.context-sidebar-content{min-width:0;min-height:0;height:100%}.session-sidebar-content{display:flex;flex-direction:column}.collapsed-rail{display:none}.session-sidebar.collapsed,.context-sidebar.collapsed{padding:8px 6px}.session-sidebar.collapsed .session-sidebar-content,.context-sidebar.collapsed .context-sidebar-content{display:none}.session-sidebar.collapsed .collapsed-rail,.context-sidebar.collapsed .collapsed-rail{width:100%;display:flex;flex-direction:column;align-items:center;gap:8px;padding:10px 2px;color:var(--text-soft);background:transparent;border:0;border-radius:7px;font-size:10px;letter-spacing:.08em}.session-sidebar.collapsed .collapsed-rail:hover,.context-sidebar.collapsed .collapsed-rail:hover{color:var(--primary);background:var(--primary-soft)}.collapsed-rail svg{width:19px}.history-scope{display:grid;grid-template-columns:1fr 1fr;gap:3px;margin-top:10px;padding:3px;background:var(--surface-strong);border-radius:8px}.history-scope button{min-height:30px;padding:0 7px;color:var(--text-soft);background:transparent;border:0;border-radius:6px;font-size:11px;font-weight:700}.history-scope button:hover{color:var(--text-color)}.history-scope button.active{color:var(--text-color);background:var(--surface);box-shadow:0 1px 3px rgba(23,32,51,.1)}.history-summary{display:flex;align-items:center;justify-content:space-between;padding:15px 6px 7px;color:var(--text-soft);font-size:10px}.history-summary small{min-width:18px;text-align:right}.session-group{margin:0}.session-group+.session-group{margin-top:13px}.session-group h3{display:flex;align-items:center;justify-content:space-between;margin:0;padding:7px 7px 4px;color:var(--text-soft);font-size:10px;font-weight:700}.session-group h3 span{font-weight:inherit}.session-group h3 small{font-size:9px;font-weight:600}.panel-toggle{position:absolute;top:50%;z-index:12;width:22px;height:48px;display:grid;place-items:center;padding:0;opacity:0;color:var(--text-soft);background:color-mix(in srgb,var(--surface) 82%,transparent);border:1px solid transparent;border-radius:999px;box-shadow:none;backdrop-filter:blur(8px);transform:translateY(-50%);transition:left .22s cubic-bezier(.2,.8,.2,1),right .22s cubic-bezier(.2,.8,.2,1),opacity .16s ease,color .16s ease,background-color .16s ease,border-color .16s ease}.panel-toggle:hover,.panel-toggle:focus-visible,.session-sidebar:hover+.session-panel-toggle,.context-sidebar:hover+.context-panel-toggle{opacity:1}.panel-toggle:hover,.panel-toggle:focus-visible{color:var(--primary);background:color-mix(in srgb,var(--surface) 96%,transparent);border-color:color-mix(in srgb,var(--primary) 22%,var(--border-color))}.panel-toggle:focus-visible{outline:2px solid color-mix(in srgb,var(--primary) 38%,transparent);outline-offset:2px}.panel-toggle svg{width:14px;height:26px}.session-panel-toggle{left:calc(var(--session-panel-width) - 11px)}.context-panel-toggle{right:calc(var(--context-panel-width) - 11px)}
 .conversation-workspace.sessions-collapsed .session-panel-toggle{background:transparent;border-color:transparent;backdrop-filter:none}.conversation-workspace.sessions-collapsed .session-panel-toggle::before{content:"";position:absolute;inset:0 0 0 50%;background:color-mix(in srgb,var(--surface) 88%,transparent);border:1px solid color-mix(in srgb,var(--border-color) 82%,transparent);border-left:0;border-radius:0 999px 999px 0;backdrop-filter:blur(8px);transition:background-color .16s ease,border-color .16s ease}.conversation-workspace.sessions-collapsed .session-panel-toggle:hover,.conversation-workspace.sessions-collapsed .session-panel-toggle:focus-visible{background:transparent;border-color:transparent}.conversation-workspace.sessions-collapsed .session-panel-toggle:hover::before,.conversation-workspace.sessions-collapsed .session-panel-toggle:focus-visible::before{background:color-mix(in srgb,var(--surface) 98%,transparent);border-color:color-mix(in srgb,var(--primary) 22%,var(--border-color))}.conversation-workspace.sessions-collapsed .session-panel-toggle svg{position:relative;z-index:1;width:8px;transform:translateX(5px)}.context-sidebar.collapsed .collapsed-rail{padding-inline:0;letter-spacing:0}.context-sidebar.collapsed .collapsed-rail span{display:block;white-space:nowrap}
 .conversation-surface{min-width:0;min-height:0;height:100%;display:grid;grid-template-rows:auto minmax(0,1fr) auto auto auto;overflow:hidden;background:var(--surface)}.conversation-toolbar{min-height:72px;display:flex;align-items:center;gap:14px;padding:10px 22px;border-bottom:1px solid var(--border-color)}.mobile-session-trigger{display:none}.conversation-toolbar label{min-width:200px}.conversation-toolbar label>span{display:block;margin-bottom:5px;color:var(--text-soft);font-size:11px;font-weight:750;letter-spacing:.08em}.conversation-toolbar select{width:100%;padding:8px 32px 8px 10px;color:var(--text-color);background:var(--surface-subtle);border:1px solid var(--border-color);border-radius:7px;font-size:13px}.mode-state{display:flex;align-items:center;gap:8px;margin-left:auto;color:var(--text-muted);font-size:12px;white-space:nowrap}.mode-state>span{width:8px;height:8px;border-radius:50%;background:var(--text-soft)}.mode-state>span.rag{background:var(--success);box-shadow:0 0 0 3px var(--success-soft)}
+.conversation-toolbar{position:relative;z-index:5}.knowledge-picker-wrap{min-width:210px;max-width:min(380px,45%);flex:1}.knowledge-picker-wrap>.toolbar-label{display:block;margin-bottom:5px;color:var(--text-soft);font-size:11px;font-weight:750;letter-spacing:.08em}.knowledge-picker{position:relative}.knowledge-picker>summary{min-height:36px;display:flex;align-items:center;justify-content:space-between;gap:8px;overflow:hidden;padding:8px 11px;color:var(--text-color);background:var(--surface-subtle);border:1px solid var(--border-color);border-radius:7px;font-size:13px;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;list-style:none}.knowledge-picker>summary::-webkit-details-marker{display:none}.knowledge-picker>summary::after{width:7px;height:7px;flex:none;border-right:1px solid var(--text-soft);border-bottom:1px solid var(--text-soft);content:'';transform:rotate(45deg)}.knowledge-picker[open]>summary::after{transform:rotate(225deg)}.knowledge-picker>summary:focus-visible{outline:2px solid var(--primary);outline-offset:2px}.knowledge-picker-menu{position:absolute;top:calc(100% + 5px);left:0;z-index:10;width:max(100%,280px);max-width:min(420px,calc(100vw - 36px));max-height:min(330px,55vh);overflow:auto;padding:8px;background:var(--surface);border:1px solid var(--border-color);border-radius:8px;box-shadow:var(--shadow-float)}.knowledge-picker-menu p{margin:5px 7px 9px;color:var(--text-muted);font-size:11px;line-height:1.5}.conversation-toolbar .knowledge-picker-menu label{min-width:0;display:flex;align-items:center;gap:9px;margin:0;padding:9px 7px;border-radius:6px;cursor:pointer}.conversation-toolbar .knowledge-picker-menu label:hover{background:var(--surface-subtle)}.knowledge-picker-menu label>span{overflow-wrap:anywhere;font-size:12px}.knowledge-picker-menu input{width:16px;height:16px;flex:none;accent-color:var(--primary)}.knowledge-picker-menu button{margin:6px 7px;padding:6px 9px;color:var(--primary);background:var(--primary-soft);border:0;border-radius:5px;font-size:11px;cursor:pointer}
+.knowledge-picker>summary>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.knowledge-picker-menu label>span{margin:0!important;color:var(--text-color)!important;font-weight:500!important;letter-spacing:0!important}
+.knowledge-picker-menu .knowledge-picker-warning{color:var(--danger)}
 .messages{min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:30px clamp(24px,4vw,64px)}.conversation-empty{min-height:100%;display:grid;align-content:center;justify-items:center;text-align:center}.mode-label{padding:5px 9px;color:var(--primary);background:var(--primary-soft);border-radius:5px;font-size:12px;font-weight:700}.conversation-empty h1{margin:18px 0 10px;font-size:clamp(28px,2vw,36px);letter-spacing:-.035em}.conversation-empty>p{max-width:620px;margin:0;color:var(--text-muted);font-size:14px;line-height:1.75}.starter-grid{width:min(760px,100%);display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:28px}.starter-grid button{display:flex;align-items:center;gap:8px;min-height:58px;padding:12px;color:var(--text-muted);background:var(--surface-subtle);border:1px solid var(--border-color);border-radius:9px;text-align:left;font-size:13px}.starter-grid button:hover{color:var(--primary);border-color:color-mix(in srgb,var(--primary) 40%,var(--border-color))}.starter-grid svg{width:17px;color:var(--primary)}
 .message{max-width:920px;display:grid;grid-template-columns:40px minmax(0,1fr);gap:12px;margin:0 auto 28px}.message.user{grid-template-columns:minmax(0,1fr) 40px}.message.user .avatar{grid-column:2}.message.user .message-body{grid-row:1;grid-column:1;justify-self:end}.message.user .message-body.editing{width:min(620px,92%)}.avatar{width:40px;height:40px;display:grid;place-items:center;color:var(--primary);background:var(--primary-soft);border:1px solid color-mix(in srgb,var(--primary) 12%,var(--border-color));border-radius:50%}.avatar svg{width:20px;height:20px;stroke-width:1.8}.user .avatar{color:#fff;background:var(--primary);border-color:var(--primary)}.message-body{min-width:0;max-width:92%}.message-meta{display:flex;align-items:center;gap:8px;margin-bottom:7px}.user .message-meta{justify-content:flex-end}.message-meta strong{font-size:13px}.message-meta span,.message-meta time{color:var(--text-soft);font-size:11px}.message-meta time{font-variant-numeric:tabular-nums}.message-meta time::before{content:"·";margin-right:8px}.bubble{padding:14px 16px;background:var(--surface-subtle);border:1px solid var(--border-color);border-radius:4px 12px 12px 12px}.user .bubble{color:#fff;background:var(--primary);border:0;border-radius:12px 4px 12px 12px}.message-content{font-size:14px;line-height:1.75;overflow-wrap:anywhere}.message-content :deep(p){margin:0 0 9px}.message-content :deep(p:last-child){margin-bottom:0}.message-content :deep(table){width:100%;margin:12px 0;border-collapse:collapse;font-size:13px}.message-content :deep(th),.message-content :deep(td){padding:8px 9px;border:1px solid var(--border-color);text-align:left}.message-content :deep(th){background:var(--primary-soft)}.message-content :deep(ul),.message-content :deep(ol){padding-left:22px}.user .message-content :deep(a){color:#fff}.message-actions{display:flex;align-items:center;gap:3px;margin-top:7px;opacity:.72;transition:opacity .16s ease}.message:hover .message-actions,.message:focus-within .message-actions{opacity:1}.user .message-actions{justify-content:flex-end}.message-actions button{min-height:30px;display:flex;align-items:center;gap:5px;padding:0 9px;color:var(--text-soft);background:transparent;border:1px solid transparent;border-radius:7px;font-size:11px;transition:color .16s ease,background-color .16s ease,border-color .16s ease}.message-actions button:hover{color:var(--primary);background:var(--surface-subtle);border-color:var(--border-color)}.message-actions button:focus-visible{outline:2px solid color-mix(in srgb,var(--primary) 38%,transparent);outline-offset:1px}.message-actions button:disabled{opacity:.45;cursor:not-allowed}.message-actions button.copied{color:var(--success)}.message-actions svg{width:15px;height:15px}.message-editor{width:100%;padding:10px;background:var(--surface);border:1px solid color-mix(in srgb,var(--primary) 38%,var(--border-color));border-radius:12px;box-shadow:0 8px 22px rgba(23,32,51,.08)}.message-editor textarea{width:100%;min-height:84px;resize:vertical;padding:10px 11px;color:var(--text-color);background:var(--surface-subtle);border:1px solid var(--border-color);border-radius:8px;outline:0;font:inherit;font-size:14px;line-height:1.65}.message-editor textarea:focus{border-color:color-mix(in srgb,var(--primary) 55%,var(--border-color));box-shadow:0 0 0 3px color-mix(in srgb,var(--primary) 10%,transparent)}.message-editor-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px}.message-editor-foot>span:first-child{color:var(--text-soft);font-size:10px}.message-editor-foot>span:last-child{display:flex;gap:7px}.message-editor button{min-height:30px;padding:0 11px;color:var(--text-muted);background:var(--surface);border:1px solid var(--border-color);border-radius:7px;font-size:11px}.message-editor button.primary{color:#fff;background:var(--primary);border-color:var(--primary)}.message-editor button:disabled{opacity:.5}
 .message-attachments{display:flex;flex-wrap:wrap;gap:8px;margin-top:11px}.message-attachments .image-only{width:58px;height:58px;overflow:hidden;padding:0;background:rgba(255,255,255,.1);border:1px solid currentColor;border-radius:7px}.message-attachments .image-only img{width:100%;height:100%;object-fit:cover}.message-attachments a{max-width:220px;display:flex;align-items:center;gap:7px;padding:8px;color:inherit;border:1px solid currentColor;border-radius:7px;text-decoration:none}.message-attachments a svg{width:19px;flex:none}.message-attachments a span{overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.bubble.streaming{position:relative}.stream-waiting{display:flex;align-items:center;gap:5px;color:var(--text-muted);font-size:12px}.stream-waiting i,.typing i{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--text-soft);animation:pulse 1s infinite alternate}.stream-waiting i:nth-child(2),.typing i:nth-child(2){animation-delay:.2s}.stream-waiting i:nth-child(3),.typing i:nth-child(3){animation-delay:.4s}.stream-waiting span{margin-left:4px}.stream-caret{width:2px;height:1.05em;display:inline-block;margin-left:3px;vertical-align:-.12em;background:var(--primary);animation:streamBlink .8s steps(1,end) infinite}.typing i{margin:0 3px}.trace-panel{margin-top:14px;overflow:hidden;color:var(--text-color);background:var(--surface);border:1px solid var(--border-color);border-radius:9px}.trace-panel>summary{display:flex;justify-content:space-between;padding:10px 12px;cursor:pointer;font-size:12px}.trace-panel>summary>span{display:flex;align-items:center;gap:7px;font-weight:700}.trace-panel>summary svg{width:16px}.trace-panel>summary small{color:var(--text-soft)}.trace-list{margin:0;padding:2px 12px 12px;list-style:none}.trace-list li{position:relative;display:grid;grid-template-columns:11px 1fr;gap:9px;padding:9px 0}.trace-list li:not(:last-child)::after{content:"";position:absolute;left:3px;top:20px;bottom:-6px;width:1px;background:var(--border-color)}.trace-dot{width:8px;height:8px;margin-top:5px;border-radius:50%;background:var(--success);z-index:1}.trace-list li.skipped .trace-dot{background:var(--text-soft)}.trace-list li.failed .trace-dot{background:var(--danger)}.trace-heading{display:flex;align-items:center;gap:7px}.trace-heading strong{font-size:12px}.trace-heading time{margin-left:auto;color:var(--text-soft);font-size:11px}.phase-badge{padding:2px 6px;color:var(--primary);background:var(--primary-soft);border-radius:4px;font-size:10px}.trace-list p{margin:5px 0 0;color:var(--text-muted);font-size:12px;line-height:1.6}.citations{margin-top:13px;padding-top:12px;color:var(--text-color);border-top:1px solid var(--border-color);font-size:12px}.citations>strong{color:var(--text-muted)}.citations details{margin-top:7px}.citations summary{color:var(--primary);cursor:pointer}.citations p{color:var(--text-muted);line-height:1.6}
@@ -1085,6 +1128,7 @@ function queueScrollToBottom() {
 @media(min-width:1600px){.conversation-workspace{--session-panel-width:310px;--context-panel-width:360px;height:calc(100dvh - 72px);grid-template-columns:var(--session-panel-width) minmax(560px,1fr) var(--context-panel-width)}.conversation-workspace.sessions-collapsed{--session-panel-width:48px}.conversation-workspace.context-collapsed{--context-panel-width:48px}.message{max-width:1040px}.context-sidebar{padding:22px}.session-sidebar{padding-inline:16px}.session-sidebar.collapsed,.context-sidebar.collapsed{padding-inline:6px}}
 @media(max-width:1250px){.conversation-workspace{--session-panel-width:260px;grid-template-columns:var(--session-panel-width) 1fr}.conversation-workspace.sessions-collapsed{--session-panel-width:48px}.context-sidebar,.context-panel-toggle{display:none}.conversation-toolbar label{min-width:0;flex:1}.mode-state{display:none}}
 @media(max-width:760px){.conversation-workspace,.conversation-workspace.sessions-collapsed,.conversation-workspace.context-collapsed{height:auto;min-height:calc(100vh - 132px);grid-template-columns:1fr;overflow:visible}.panel-toggle{display:none}.session-sidebar,.session-sidebar.collapsed{width:min(340px,calc(100vw - 32px));position:fixed;top:68px;bottom:64px;left:0;z-index:91;display:flex;visibility:hidden;transform:translateX(-105%);padding:18px 14px;border-right:1px solid var(--border-color);box-shadow:var(--shadow-float);transition:transform .2s ease,visibility .2s}.session-sidebar.mobile-open{visibility:visible;transform:translateX(0)}.session-sidebar.collapsed .session-sidebar-content{display:flex}.session-sidebar.collapsed .collapsed-rail{display:none}.session-heading-actions .drawer-close{display:grid}.mobile-session-backdrop{position:fixed;inset:68px 0 64px;z-index:90;display:block;padding:0;background:rgba(6,10,17,.48);border:0}.conversation-surface{min-height:calc(100vh - 132px)}.conversation-toolbar{align-items:stretch;flex-direction:column}.mobile-session-trigger{width:fit-content;min-height:38px;display:flex;align-items:center;gap:7px;padding:0 11px;color:var(--text-muted);background:var(--surface-subtle);border:1px solid var(--border-color);border-radius:8px}.mobile-session-trigger svg{width:18px}.mobile-session-trigger span{font-size:13px;font-weight:700}.mobile-session-trigger small{min-width:20px;padding:2px 6px;color:var(--primary);background:var(--primary-soft);border-radius:99px;text-align:center}.conversation-toolbar label{min-width:0}.mode-state{margin-left:0}.messages{min-height:460px;padding:22px 14px}.starter-grid{grid-template-columns:1fr}.message-body,.message.user .message-body.editing{max-width:100%;width:100%}.message-editor-foot{align-items:flex-end;flex-direction:column}.composer{margin-inline:10px}.conversation-toast{top:80px;right:16px}}
+@media(max-width:760px){.knowledge-picker-wrap{width:100%;max-width:none}.knowledge-picker-menu{width:100%}}
 @media(max-width:760px){.session-sidebar.mobile-open .session-actions{border-left-color:color-mix(in srgb,var(--border-color) 78%,transparent);opacity:1;pointer-events:auto}}
 .composer{transition:border-color .16s ease,box-shadow .16s ease}
 .message-interruption{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:12px;padding:10px;color:#9a3412;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;font-size:12px;line-height:1.5}

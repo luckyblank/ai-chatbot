@@ -55,7 +55,8 @@ public class ConversationRepository {
 
     public synchronized List<ConversationSession> findByKnowledgeBaseId(String knowledgeBaseId) {
         return sessions.values().stream()
-                .filter(session -> knowledgeBaseId == null || knowledgeBaseId.equals(session.getKnowledgeBaseId()))
+                .filter(session -> knowledgeBaseId == null
+                        || session.selectedKnowledgeBaseIds().contains(knowledgeBaseId))
                 .sorted(Comparator.comparing(ConversationSession::getUpdatedAt).reversed())
                 .toList();
     }

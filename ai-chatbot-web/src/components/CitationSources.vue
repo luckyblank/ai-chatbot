@@ -6,11 +6,13 @@ const props = defineProps({
   citations: { type: Array, default: () => [] },
   answer: { type: String, default: '' },
   knowledgeBaseId: { type: String, default: '' },
+  knowledgeBases: { type: Array, default: () => [] },
   compact: { type: Boolean, default: false },
   showHeading: { type: Boolean, default: true }
 })
 
 const presentation = computed(() => citationPresentation(props.citations, props.answer))
+const knowledgeName = id => props.knowledgeBases.find(base => base.id === id)?.name || id
 </script>
 
 <template>
@@ -24,6 +26,7 @@ const presentation = computed(() => citationPresentation(props.citations, props.
       <details v-for="(group, groupIndex) in presentation.groups" :key="group.key" class="citation-document" :open="groupIndex === 0">
         <summary class="citation-document-heading">
           <strong>{{ group.fileName }}</strong>
+          <span v-if="group.knowledgeBaseId || knowledgeBaseId" class="citation-base">{{ knowledgeName(group.knowledgeBaseId || knowledgeBaseId) }}</span>
           <span>{{ group.snippets.length }} 个片段</span>
         </summary>
         <ol class="citation-snippets">
@@ -35,7 +38,7 @@ const presentation = computed(() => citationPresentation(props.citations, props.
                 <span v-if="snippet.sectionTitle">{{ snippet.sectionTitle }}</span>
               </summary>
               <p>{{ snippet.excerpt || '无法自动定位到更细的原文语句，请到知识库核对文档。' }}</p>
-              <RouterLink v-if="knowledgeBaseId && group.documentId" class="citation-original-link" :to="{ path: '/knowledge-bases', query: { knowledge: knowledgeBaseId, document: group.documentId } }" target="_blank" rel="noopener noreferrer">查看原文</RouterLink>
+              <RouterLink v-if="(group.knowledgeBaseId || knowledgeBaseId) && group.documentId" class="citation-original-link" :to="{ path: '/knowledge-bases', query: { knowledge: group.knowledgeBaseId || knowledgeBaseId, document: group.documentId } }" target="_blank" rel="noopener noreferrer">查看原文</RouterLink>
             </details>
           </li>
         </ol>
@@ -50,6 +53,7 @@ const presentation = computed(() => citationPresentation(props.citations, props.
 .citation-heading strong { color: var(--text-muted); }
 .citation-candidate-note { margin: 0 0 6px; color: var(--text-soft); font-size: 11px; }
 .citation-heading span, .citation-document-heading span { flex: none; color: var(--text-soft); font-size: 11px; }
+.citation-document-heading .citation-base { max-width: 35%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .citation-documents { display: grid; gap: 10px; margin-top: 10px; }
 .citation-document { min-width: 0; overflow: hidden; background: var(--surface); border: 1px solid var(--border-color); border-radius: 9px; }
 .citation-document-heading { padding: 10px 12px; background: var(--surface-subtle); }

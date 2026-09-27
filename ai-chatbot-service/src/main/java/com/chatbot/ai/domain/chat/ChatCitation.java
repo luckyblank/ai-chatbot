@@ -10,6 +10,7 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 public class ChatCitation {
+    private String knowledgeBaseId;
     private String documentId;
     private String chunkId;
     private String fileName;

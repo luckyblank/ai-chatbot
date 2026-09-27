@@ -21,6 +21,18 @@ public class ConversationSession {
      */
     private String ownerId;
     private String knowledgeBaseId;
+    /** Null in legacy persisted conversations; then knowledgeBaseId is used. */
+    private List<String> knowledgeBaseIds;
+
+    public List<String> getKnowledgeBaseIds() {
+        return selectedKnowledgeBaseIds();
+    }
+
+    public List<String> selectedKnowledgeBaseIds() {
+        if (knowledgeBaseIds != null) return knowledgeBaseIds;
+        return knowledgeBaseId == null || knowledgeBaseId.isBlank()
+                ? List.of() : List.of(knowledgeBaseId);
+    }
     private String scenarioCode;
     private String title;
     /** True only after an explicit rename, so delayed AI naming can never overwrite the user. */

@@ -16,6 +16,7 @@ import java.util.List;
 @RequiredArgsConstructor
 public class ScenarioService {
     private final ScenarioRepository repository;
+    private final KnowledgeBaseService knowledgeBaseService;
 
     public List<ScenarioDefinition> list() {
         return repository.findAll();
@@ -30,10 +31,24 @@ public class ScenarioService {
         ScenarioDefinition scenario = get(code);
         List<String> tools = validateTools(request.tools());
         List<String> process = validateProcess(request.process());
+        List<String> allowedKnowledgeBaseIds = request.allowedKnowledgeBaseIds() == null
+                ? scenario.getAllowedKnowledgeBaseIds()
+                : validateKnowledgeBaseIds(request.allowedKnowledgeBaseIds(), "可用知识库");
+        List<String> defaultKnowledgeBaseIds = request.defaultKnowledgeBaseIds() == null
+                ? scenario.getDefaultKnowledgeBaseIds()
+                : validateKnowledgeBaseIds(request.defaultKnowledgeBaseIds(), "默认知识库");
+        if (defaultKnowledgeBaseIds.size() > 3) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "默认知识库最多选择 3 个");
+        }
+        if (!allowedKnowledgeBaseIds.isEmpty() && !allowedKnowledgeBaseIds.containsAll(defaultKnowledgeBaseIds)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "默认知识库必须属于当前场景的可用范围");
+        }
         scenario.setName(request.name().trim());
         scenario.setShortName(request.shortName().trim());
         scenario.setSummary(request.summary().trim());
         scenario.setKnowledgeMode(request.knowledgeMode());
+        scenario.setAllowedKnowledgeBaseIds(allowedKnowledgeBaseIds);
+        scenario.setDefaultKnowledgeBaseIds(defaultKnowledgeBaseIds);
         scenario.setTools(tools);
         scenario.setProcess(process);
         scenario.setGuardrail(request.guardrail().trim());
@@ -71,5 +86,25 @@ public class ScenarioService {
             }
         }
         return List.copyOf(steps);
+    }
+
+    private List<String> validateKnowledgeBaseIds(List<String> values, String label) {
+        LinkedHashSet<String> ids = new LinkedHashSet<>();
+        for (String value : values) {
+            if (value == null || value.isBlank()) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, label + "不能包含空 ID");
+            }
+            String id = value.trim();
+            if (!ids.add(id)) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, label + "不能重复选择：" + id);
+            }
+            try {
+                knowledgeBaseService.getKnowledgeBase(id);
+            } catch (ResponseStatusException exception) {
+                if (exception.getStatusCode() != HttpStatus.NOT_FOUND) throw exception;
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, label + "不存在：" + id);
+            }
+        }
+        return List.copyOf(ids);
     }
 }

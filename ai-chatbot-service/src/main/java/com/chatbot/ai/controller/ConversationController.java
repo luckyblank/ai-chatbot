@@ -18,6 +18,8 @@ import com.chatbot.ai.service.AttachmentService;
 import com.chatbot.ai.service.ConversationTitleService;
 import com.chatbot.ai.service.CitationEvidenceSelector;
 import com.chatbot.ai.service.WidgetAssistantService;
+import com.chatbot.ai.service.ScenarioService;
+import com.chatbot.ai.domain.scenario.ScenarioDefinition;
 import com.chatbot.ai.security.AuthInterceptor;
 import jakarta.validation.Valid;
 import jakarta.servlet.http.HttpServletRequest;
@@ -71,6 +73,7 @@ public class ConversationController {
     private final AttachmentService attachmentService;
     private final ConversationTitleService conversationTitleService;
     private final WidgetAssistantService widgetAssistantService;
+    private final ScenarioService scenarioService;
     private final KnowledgeChunkRepository chunkRepository;
     private final ChatMemory chatMemory;
 
@@ -90,7 +93,7 @@ public class ConversationController {
     }
 
     private ConversationSession withFocusedCitationExcerpts(ConversationSession session) {
-        if (session.getKnowledgeBaseId() == null || session.getMessages() == null) return session;
+        if (session.getMessages() == null) return session;
         List<ChatMessageEntry> messages = new ArrayList<>();
         String lastQuestion = "";
         for (ChatMessageEntry message : session.getMessages()) {
@@ -103,7 +106,7 @@ public class ConversationController {
             }
             List<ChatCitation> citations = new ArrayList<>();
             for (int index = 0; index < message.getCitations().size(); index++) {
-                citations.add(withFocusedCitationExcerpt(session.getKnowledgeBaseId(),
+                citations.add(withFocusedCitationExcerpt(session.selectedKnowledgeBaseIds(),
                         message.getCitations().get(index), lastQuestion, message.getContent(), index + 1));
             }
             messages.add(ChatMessageEntry.builder()
@@ -114,20 +117,32 @@ public class ConversationController {
         }
         return ConversationSession.builder()
                 .id(session.getId()).ownerId(session.getOwnerId())
-                .knowledgeBaseId(session.getKnowledgeBaseId()).scenarioCode(session.getScenarioCode())
+                .knowledgeBaseId(session.getKnowledgeBaseId())
+                .knowledgeBaseIds(session.selectedKnowledgeBaseIds()).scenarioCode(session.getScenarioCode())
                 .title(session.getTitle()).titleCustomized(session.isTitleCustomized())
                 .createdAt(session.getCreatedAt()).updatedAt(session.getUpdatedAt())
                 .messages(messages).build();
     }
 
-    private ChatCitation withFocusedCitationExcerpt(String knowledgeBaseId, ChatCitation citation,
+    private ChatCitation withFocusedCitationExcerpt(List<String> selectedKnowledgeBaseIds, ChatCitation citation,
                                                     String question, String answer, int sourceNumber) {
         if (citation == null) return null;
+        String knowledgeBaseId = citation.getKnowledgeBaseId();
+        if ((knowledgeBaseId == null || knowledgeBaseId.isBlank()) && selectedKnowledgeBaseIds.size() == 1) {
+            knowledgeBaseId = selectedKnowledgeBaseIds.get(0);
+        }
+        if (knowledgeBaseId == null || !selectedKnowledgeBaseIds.contains(knowledgeBaseId)) {
+            // Preserve historical evidence text but never expose a document link outside this conversation.
+            return ChatCitation.builder().fileName(citation.getFileName())
+                    .pageNumber(citation.getPageNumber()).sectionTitle(citation.getSectionTitle())
+                    .excerpt(citation.getExcerpt()).build();
+        }
+        final String sourceKnowledgeBaseId = knowledgeBaseId;
         String sourceText = citation.getExcerpt();
         if (citation.getChunkId() != null && !citation.getChunkId().isBlank()
                 && citation.getDocumentId() != null && !citation.getDocumentId().isBlank()) {
             sourceText = chunkRepository.findById(citation.getChunkId())
-                    .filter(chunk -> knowledgeBaseId.equals(chunk.getKnowledgeBaseId()))
+                    .filter(chunk -> sourceKnowledgeBaseId.equals(chunk.getKnowledgeBaseId()))
                     .filter(chunk -> Objects.equals(chunk.getDocumentId(), citation.getDocumentId()))
                     .filter(chunk -> chunk.getContent() != null)
                     .map(chunk -> chunk.getContent().trim())
@@ -136,6 +151,7 @@ public class ConversationController {
         CitationEvidenceSelector.Evidence evidence = CitationEvidenceSelector.select(
                 sourceText, question, answer, sourceNumber);
         return ChatCitation.builder()
+                .knowledgeBaseId(knowledgeBaseId)
                 .documentId(citation.getDocumentId()).chunkId(citation.getChunkId())
                 .fileName(citation.getFileName()).pageNumber(citation.getPageNumber())
                 .sectionTitle(evidence.sectionTitle() == null ? citation.getSectionTitle() : evidence.sectionTitle())
@@ -168,25 +184,56 @@ public class ConversationController {
     }
 
     private ConversationSession createConversation(AuthenticatedUser actor, CreateConversationRequest request) {
-        if (request.knowledgeBaseId() != null && !request.knowledgeBaseId().isBlank()) {
-            knowledgeBaseService.getKnowledgeBase(request.knowledgeBaseId());
-        }
+        String scenarioCode = request.scenarioCode() == null || request.scenarioCode().isBlank()
+                ? "general" : request.scenarioCode();
+        ScenarioDefinition scenario = scenarioService.get(scenarioCode);
+        List<String> knowledgeBaseIds = resolveKnowledgeBaseIds(request, scenario);
         Instant now = Instant.now();
         String title = request.title() == null || request.title().isBlank()
                 ? "新对话" : request.title().trim();
         ConversationSession session = ConversationSession.builder()
                 .id(UUID.randomUUID().toString())
                 .ownerId(actor.id())
-                .knowledgeBaseId(request.knowledgeBaseId() == null || request.knowledgeBaseId().isBlank()
-                        ? null : request.knowledgeBaseId())
-                .scenarioCode(request.scenarioCode() == null || request.scenarioCode().isBlank()
-                        ? "general" : request.scenarioCode())
+                .knowledgeBaseId(knowledgeBaseIds.isEmpty() ? null : knowledgeBaseIds.get(0))
+                .knowledgeBaseIds(knowledgeBaseIds)
+                .scenarioCode(scenarioCode)
                 .title(title)
                 .titleCustomized(!ConversationRepository.isDefaultTitle(title))
                 .createdAt(now)
                 .updatedAt(now)
                 .build();
         return conversationRepository.save(session);
+    }
+
+    private List<String> resolveKnowledgeBaseIds(CreateConversationRequest request, ScenarioDefinition scenario) {
+        List<String> requested = request.knowledgeBaseIds() != null ? request.knowledgeBaseIds()
+                : request.knowledgeBaseId() != null
+                ? request.knowledgeBaseId().isBlank() ? List.of() : List.of(request.knowledgeBaseId())
+                : scenario.getDefaultKnowledgeBaseIds() == null ? List.of() : scenario.getDefaultKnowledgeBaseIds();
+        if (requested.size() > 3) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "每个会话最多选择 3 个知识库");
+        }
+        List<String> ids = new ArrayList<>();
+        for (String value : requested) {
+            if (value == null || value.isBlank()) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "知识库 ID 不能为空");
+            }
+            String id = value.trim();
+            if (ids.contains(id)) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "不能重复选择知识库");
+            }
+            knowledgeBaseService.getKnowledgeBase(id);
+            if (scenario.getAllowedKnowledgeBaseIds() != null
+                    && !scenario.getAllowedKnowledgeBaseIds().isEmpty()
+                    && !scenario.getAllowedKnowledgeBaseIds().contains(id)) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "所选知识库不在当前场景的可用范围内");
+            }
+            ids.add(id);
+        }
+        if (ids.isEmpty() && "必选".equals(scenario.getKnowledgeMode())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "当前场景要求先选择知识库");
+        }
+        return List.copyOf(ids);
     }
 
     @PatchMapping("/{conversationId}")
@@ -235,8 +282,8 @@ public class ConversationController {
         AuthenticatedUser actor = requireActor(servletRequest);
         ConversationSession session = requireOwnedConversation(conversationId, actor);
         List<ChatAttachment> attachments = ownedAttachments(session.getId(), request.attachmentIds());
-        KnowledgeChatService.AnswerResult result = knowledgeChatService.answer(
-                session.getId(), session.getKnowledgeBaseId(), session.getScenarioCode(), request.message(),
+        KnowledgeChatService.AnswerResult result = knowledgeChatService.answerWithKnowledgeBases(
+                session.getId(), session.selectedKnowledgeBaseIds(), session.getScenarioCode(), request.message(),
                 imageMedia(attachments), actor, request.requestId());
         return persistExchange(session, request, attachments, result, request.requestId());
     }
@@ -255,8 +302,8 @@ public class ConversationController {
 
         Flux<ServerSentEvent<Object>> answerEvents = Flux.defer(() -> {
                     restoreChatMemory(session);
-                    return knowledgeChatService.streamAnswer(
-                                    session.getId(), session.getKnowledgeBaseId(), session.getScenarioCode(),
+                    return knowledgeChatService.streamAnswerWithKnowledgeBases(
+                                    session.getId(), session.selectedKnowledgeBaseIds(), session.getScenarioCode(),
                                     request.message(), imageMedia(attachments), actor, request.requestId())
                             .map(event -> {
                                 if (event instanceof KnowledgeChatService.AnswerDelta delta) {
@@ -295,8 +342,8 @@ public class ConversationController {
 
         Flux<ServerSentEvent<Object>> answerEvents = Flux.defer(() -> {
                     rebuildChatMemory(session, messageIndex);
-                    return knowledgeChatService.streamAnswer(
-                                    session.getId(), session.getKnowledgeBaseId(), session.getScenarioCode(),
+                    return knowledgeChatService.streamAnswerWithKnowledgeBases(
+                                    session.getId(), session.selectedKnowledgeBaseIds(), session.getScenarioCode(),
                                     request.content(), imageMedia(attachments), actor, stableRequestId)
                             .map(event -> {
                                 if (event instanceof KnowledgeChatService.AnswerDelta delta) {

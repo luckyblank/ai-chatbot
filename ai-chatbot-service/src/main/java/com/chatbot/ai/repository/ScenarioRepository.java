@@ -31,6 +31,8 @@ public class ScenarioRepository {
                     short_name VARCHAR(40) NOT NULL,
                     summary VARCHAR(500) NOT NULL,
                     knowledge_mode VARCHAR(20) NOT NULL,
+                    allowed_knowledge_base_ids_json LONGTEXT,
+                    default_knowledge_base_ids_json LONGTEXT,
                     tools_json LONGTEXT NOT NULL,
                     process_json LONGTEXT NOT NULL,
                     guardrail VARCHAR(1000) NOT NULL,
@@ -38,6 +40,8 @@ public class ScenarioRepository {
                     updated_at TIMESTAMP NOT NULL
                 )
                 """);
+        ensureColumn("allowed_knowledge_base_ids_json");
+        ensureColumn("default_knowledge_base_ids_json");
         Integer count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM ai_scenario", Integer.class);
         if (count != null && count == 0) seedDefaults();
         else {
@@ -57,17 +61,21 @@ public class ScenarioRepository {
 
     public ScenarioDefinition save(ScenarioDefinition scenario) {
         int updated = jdbcTemplate.update("""
-                UPDATE ai_scenario SET name=?, short_name=?, summary=?, knowledge_mode=?, tools_json=?,
+                UPDATE ai_scenario SET name=?, short_name=?, summary=?, knowledge_mode=?,
+                allowed_knowledge_base_ids_json=?, default_knowledge_base_ids_json=?, tools_json=?,
                 process_json=?, guardrail=?, sort_order=?, updated_at=? WHERE code=?
                 """, scenario.getName(), scenario.getShortName(), scenario.getSummary(), scenario.getKnowledgeMode(),
+                writeJson(scenario.getAllowedKnowledgeBaseIds()), writeJson(scenario.getDefaultKnowledgeBaseIds()),
                 writeJson(scenario.getTools()), writeJson(scenario.getProcess()), scenario.getGuardrail(),
                 scenario.getSortOrder(), Timestamp.from(scenario.getUpdatedAt()), scenario.getCode());
         if (updated == 0) {
             jdbcTemplate.update("""
-                    INSERT INTO ai_scenario(code, name, short_name, summary, knowledge_mode, tools_json,
-                    process_json, guardrail, sort_order, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO ai_scenario(code, name, short_name, summary, knowledge_mode,
+                    allowed_knowledge_base_ids_json, default_knowledge_base_ids_json, tools_json,
+                    process_json, guardrail, sort_order, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, scenario.getCode(), scenario.getName(), scenario.getShortName(), scenario.getSummary(),
-                    scenario.getKnowledgeMode(), writeJson(scenario.getTools()), writeJson(scenario.getProcess()),
+                    scenario.getKnowledgeMode(), writeJson(scenario.getAllowedKnowledgeBaseIds()),
+                    writeJson(scenario.getDefaultKnowledgeBaseIds()), writeJson(scenario.getTools()), writeJson(scenario.getProcess()),
                     scenario.getGuardrail(), scenario.getSortOrder(), Timestamp.from(scenario.getUpdatedAt()));
         }
         return scenario;
@@ -80,6 +88,8 @@ public class ScenarioRepository {
                 .shortName(rs.getString("short_name"))
                 .summary(rs.getString("summary"))
                 .knowledgeMode(rs.getString("knowledge_mode"))
+                .allowedKnowledgeBaseIds(readList(rs.getString("allowed_knowledge_base_ids_json")))
+                .defaultKnowledgeBaseIds(readList(rs.getString("default_knowledge_base_ids_json")))
                 .tools(readList(rs.getString("tools_json")))
                 .process(readList(rs.getString("process_json")))
                 .guardrail(rs.getString("guardrail"))
@@ -164,10 +174,27 @@ public class ScenarioRepository {
     }
 
     private List<String> readList(String json) {
+        if (json == null || json.isBlank()) return List.of();
         try {
             return objectMapper.readValue(json, new TypeReference<>() { });
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("场景配置解析失败", exception);
+        }
+    }
+
+    private void ensureColumn(String column) {
+        Boolean exists = jdbcTemplate.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection -> {
+            try (var result = connection.getMetaData().getColumns(
+                    connection.getCatalog(), null, "%", "%")) {
+                while (result.next()) {
+                    if ("ai_scenario".equalsIgnoreCase(result.getString("TABLE_NAME"))
+                            && column.equalsIgnoreCase(result.getString("COLUMN_NAME"))) return true;
+                }
+                return false;
+            }
+        });
+        if (!Boolean.TRUE.equals(exists)) {
+            jdbcTemplate.execute("ALTER TABLE ai_scenario ADD COLUMN " + column + " LONGTEXT");
         }
     }
 }

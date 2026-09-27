@@ -13,10 +13,14 @@ import com.chatbot.ai.service.ConversationTitleService;
 import com.chatbot.ai.service.KnowledgeBaseService;
 import com.chatbot.ai.service.KnowledgeChatService;
 import com.chatbot.ai.service.WidgetAssistantService;
+import com.chatbot.ai.service.ScenarioService;
+import com.chatbot.ai.domain.scenario.ScenarioDefinition;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.http.MediaType;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
@@ -44,6 +48,7 @@ class ConversationControllerOwnershipTest {
     private ConversationRepository repository;
     private KnowledgeBaseService knowledgeBaseService;
     private WidgetAssistantService widgetAssistantService;
+    private ScenarioService scenarioService;
     private KnowledgeChunkRepository chunkRepository;
     private MockMvc mvc;
 
@@ -52,10 +57,15 @@ class ConversationControllerOwnershipTest {
         repository = mock(ConversationRepository.class);
         knowledgeBaseService = mock(KnowledgeBaseService.class);
         widgetAssistantService = mock(WidgetAssistantService.class);
+        scenarioService = mock(ScenarioService.class);
+        when(scenarioService.get(org.mockito.ArgumentMatchers.anyString())).thenAnswer(invocation ->
+                ScenarioDefinition.builder().code(invocation.getArgument(0)).knowledgeMode("可选")
+                        .allowedKnowledgeBaseIds(List.of()).defaultKnowledgeBaseIds(List.of()).build());
         chunkRepository = mock(KnowledgeChunkRepository.class);
         ConversationController controller = new ConversationController(repository,
                 knowledgeBaseService, mock(KnowledgeChatService.class),
                 mock(AttachmentService.class), mock(ConversationTitleService.class), widgetAssistantService,
+                scenarioService,
                 chunkRepository, mock(ChatMemory.class));
         mvc = MockMvcBuilders.standaloneSetup(controller)
                 .setControllerAdvice(new ApiExceptionHandler()).build();
@@ -144,6 +154,101 @@ class ConversationControllerOwnershipTest {
                 .andExpect(jsonPath("$.ownerId").value(OPERATOR_A.id()))
                 .andReturn().getResponse().getContentAsString();
         assertThat(response).contains(OPERATOR_A.id());
+    }
+
+    @Test
+    void threeSelectedBasesArePersistedAndLegacyFieldShowsTheFirst() throws Exception {
+        when(repository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        mvc.perform(post("/api/v1/conversations")
+                        .requestAttr(AuthInterceptor.USER_ATTRIBUTE, OPERATOR_A)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"scenarioCode":"general","knowledgeBaseId":"old",
+                                 "knowledgeBaseIds":["kb-a","kb-b","kb-c"]}
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.knowledgeBaseId").value("kb-a"))
+                .andExpect(jsonPath("$.knowledgeBaseIds.length()").value(3))
+                .andExpect(jsonPath("$.knowledgeBaseIds[2]").value("kb-c"));
+    }
+
+    @Test
+    void rejectsTooManyDuplicateMissingOrDisallowedBases() throws Exception {
+        when(knowledgeBaseService.getKnowledgeBase("missing"))
+                .thenThrow(new ResponseStatusException(HttpStatus.NOT_FOUND, "知识库不存在"));
+        when(scenarioService.get("restricted")).thenReturn(ScenarioDefinition.builder()
+                .code("restricted").knowledgeMode("可选")
+                .allowedKnowledgeBaseIds(List.of("kb-a")).defaultKnowledgeBaseIds(List.of()).build());
+        String[] rejected = {
+                "{\"knowledgeBaseIds\":[\"a\",\"b\",\"c\",\"d\"]}",
+                "{\"knowledgeBaseIds\":[\"a\",\"a\"]}",
+                "{\"knowledgeBaseIds\":[\"missing\"]}",
+                "{\"scenarioCode\":\"restricted\",\"knowledgeBaseIds\":[\"kb-b\"]}"
+        };
+        int[] statuses = {400, 400, 404, 400};
+        for (int index = 0; index < rejected.length; index++) {
+            mvc.perform(post("/api/v1/conversations")
+                            .requestAttr(AuthInterceptor.USER_ATTRIBUTE, OPERATOR_A)
+                            .contentType(MediaType.APPLICATION_JSON).content(rejected[index]))
+                    .andExpect(status().is(statuses[index]));
+        }
+    }
+
+    @Test
+    void defaultsApplyOnlyWhenNeitherRequestFieldIsProvidedAndRequiredRejectsEmptySelection() throws Exception {
+        when(repository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(scenarioService.get("required")).thenReturn(ScenarioDefinition.builder()
+                .code("required").knowledgeMode("必选")
+                .allowedKnowledgeBaseIds(List.of()).defaultKnowledgeBaseIds(List.of("kb-default")).build());
+        mvc.perform(post("/api/v1/conversations")
+                        .requestAttr(AuthInterceptor.USER_ATTRIBUTE, OPERATOR_A)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"scenarioCode\":\"required\"}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.knowledgeBaseIds[0]").value("kb-default"));
+        mvc.perform(post("/api/v1/conversations")
+                        .requestAttr(AuthInterceptor.USER_ATTRIBUTE, OPERATOR_A)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"scenarioCode\":\"required\",\"knowledgeBaseIds\":[]}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void citationHydratesOnlyWithinItsOwnSelectedBase() throws Exception {
+        ConversationSession saved = session(OPERATOR_A.id());
+        saved.setKnowledgeBaseId("base-1");
+        saved.setKnowledgeBaseIds(List.of("base-1", "base-2"));
+        saved.setMessages(List.of(ChatMessageEntry.builder().role("assistant")
+                .citations(List.of(ChatCitation.builder().knowledgeBaseId("base-2")
+                        .documentId("document-2").chunkId("chunk-2").excerpt("旧摘要").build())).build()));
+        when(repository.findById("conversation-1")).thenReturn(Optional.of(saved));
+        when(chunkRepository.findById("chunk-2")).thenReturn(Optional.of(KnowledgeChunk.builder()
+                .id("chunk-2").knowledgeBaseId("base-2").documentId("document-2")
+                .content("第二个知识库的正文内容").build()));
+
+        mvc.perform(get("/api/v1/conversations/conversation-1")
+                        .requestAttr(AuthInterceptor.USER_ATTRIBUTE, OPERATOR_A))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.messages[0].citations[0].knowledgeBaseId").value("base-2"))
+                .andExpect(jsonPath("$.messages[0].citations[0].excerpt").value("第二个知识库的正文内容"));
+    }
+
+    @Test
+    void multiBaseCitationWithoutSourceKeepsTextButCannotLinkToAnAssumedBase() throws Exception {
+        ConversationSession saved = session(OPERATOR_A.id());
+        saved.setKnowledgeBaseId("base-1");
+        saved.setKnowledgeBaseIds(List.of("base-1", "base-2"));
+        saved.setMessages(List.of(ChatMessageEntry.builder().role("assistant")
+                .citations(List.of(ChatCitation.builder().documentId("document-unknown")
+                        .chunkId("chunk-unknown").excerpt("历史摘要").build())).build()));
+        when(repository.findById("conversation-1")).thenReturn(Optional.of(saved));
+
+        mvc.perform(get("/api/v1/conversations/conversation-1")
+                        .requestAttr(AuthInterceptor.USER_ATTRIBUTE, OPERATOR_A))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.messages[0].citations[0].excerpt").value("历史摘要"))
+                .andExpect(jsonPath("$.messages[0].citations[0].documentId").doesNotExist())
+                .andExpect(jsonPath("$.messages[0].citations[0].knowledgeBaseId").doesNotExist());
     }
 
     @Test

@@ -106,7 +106,14 @@ public class KnowledgeChatService {
     public AnswerResult answer(String conversationId, String knowledgeBaseId, String scenarioCode,
                                String question, List<Media> media, AuthenticatedUser actor,
                                String requestId) {
-        PreparedAnswer prepared = prepare(conversationId, knowledgeBaseId, scenarioCode, question, media,
+        return answerWithKnowledgeBases(conversationId, singleKnowledgeBase(knowledgeBaseId), scenarioCode,
+                question, media, actor, requestId);
+    }
+
+    public AnswerResult answerWithKnowledgeBases(String conversationId, List<String> knowledgeBaseIds, String scenarioCode,
+                               String question, List<Media> media, AuthenticatedUser actor,
+                               String requestId) {
+        PreparedAnswer prepared = prepare(conversationId, knowledgeBaseIds, scenarioCode, question, media,
                 actor, requestId);
         if (prepared.immediateResult() != null) {
             return prepared.immediateResult();
@@ -158,8 +165,19 @@ public class KnowledgeChatService {
                                                  List<Media> media,
                                                  AuthenticatedUser actor,
                                                  String requestId) {
+        return streamAnswerWithKnowledgeBases(conversationId, singleKnowledgeBase(knowledgeBaseId), scenarioCode,
+                question, media, actor, requestId);
+    }
+
+    public Flux<AnswerStreamEvent> streamAnswerWithKnowledgeBases(String conversationId,
+                                                 List<String> knowledgeBaseIds,
+                                                 String scenarioCode,
+                                                 String question,
+                                                 List<Media> media,
+                                                 AuthenticatedUser actor,
+                                                 String requestId) {
         return Flux.defer(() -> {
-            PreparedAnswer prepared = prepare(conversationId, knowledgeBaseId, scenarioCode, question, media,
+            PreparedAnswer prepared = prepare(conversationId, knowledgeBaseIds, scenarioCode, question, media,
                     actor, requestId);
             if (prepared.immediateResult() != null) {
                 AnswerResult immediate = prepared.immediateResult();
@@ -336,7 +354,7 @@ public class KnowledgeChatService {
     }
 
     private PreparedAnswer prepare(String conversationId,
-                                   String knowledgeBaseId,
+                                   List<String> knowledgeBaseIds,
                                    String scenarioCode,
                                    String question,
                                    List<Media> media,
@@ -352,6 +370,21 @@ public class KnowledgeChatService {
 
         String normalizedScenarioCode = safeScenario(scenarioCode);
         ScenarioDefinition scenario = scenarioRepository.findByCode(normalizedScenarioCode).orElse(null);
+        List<String> selectedKnowledgeBaseIds = knowledgeBaseIds == null ? List.of() : List.copyOf(knowledgeBaseIds);
+        if (selectedKnowledgeBaseIds.size() > 3) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "会话选择的知识库数量超过上限");
+        }
+        for (String id : selectedKnowledgeBaseIds) {
+            if (catalogRepository.findKnowledgeBase(id).isEmpty()) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "会话中的知识库已删除，请重新创建会话");
+            }
+            if (scenario != null && scenario.getAllowedKnowledgeBaseIds() != null
+                    && !scenario.getAllowedKnowledgeBaseIds().isEmpty()
+                    && !scenario.getAllowedKnowledgeBaseIds().contains(id)) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "当前场景已不允许使用会话中的知识库，请重新创建会话");
+            }
+        }
         String scenarioInstruction = scenarioInstruction(normalizedScenarioCode, scenario);
         List<FunctionCallback> toolCallbacks = scenarioToolPolicy.allowedCallbacks(scenario);
         boolean generalScenario = "general".equals(normalizedScenarioCode);
@@ -359,7 +392,7 @@ public class KnowledgeChatService {
                 ? generalChatClientProvider : chatClientProvider;
         String unavailableMessage = generalScenario ? "通用模型服务初始化失败" : "业务模型服务初始化失败";
 
-        if (knowledgeBaseId == null || knowledgeBaseId.isBlank()) {
+        if (selectedKnowledgeBaseIds.isEmpty()) {
             if (scenario != null && "必选".equals(scenario.getKnowledgeMode())) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT, "当前场景要求先选择知识库");
             }
@@ -385,9 +418,11 @@ public class KnowledgeChatService {
         if (chatClient == null) {
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, unavailableMessage);
         }
-        boolean hasReadyDocument = catalogRepository.findDocuments(knowledgeBaseId).stream()
-                .anyMatch(document -> document.getStatus() == DocumentStatus.READY);
-        if (!hasReadyDocument) {
+        List<String> readyKnowledgeBaseIds = selectedKnowledgeBaseIds.stream()
+                .filter(id -> catalogRepository.findDocuments(id).stream()
+                        .anyMatch(document -> document.getStatus() == DocumentStatus.READY))
+                .toList();
+        if (readyKnowledgeBaseIds.isEmpty()) {
             traces.add(trace("retrieval", "知识证据不可用",
                     "所选知识库尚无已完成索引的文档；继续处理已授权的只读业务查询",
                     "completed", 0));
@@ -406,17 +441,14 @@ public class KnowledgeChatService {
         }
 
         traces.add(trace("scope", "限定知识库范围",
-                "仅允许检索知识库 " + shortId(knowledgeBaseId) + "，会话 " + shortId(conversationId),
+                "仅允许检索知识库 " + selectedKnowledgeBaseIds.stream().map(this::shortId).toList()
+                        + "，会话 " + shortId(conversationId)
+                        + (readyKnowledgeBaseIds.size() < selectedKnowledgeBaseIds.size()
+                        ? "；部分知识库没有已完成索引的文档" : ""),
                 "completed", 0));
 
         long retrievalStartedAt = System.nanoTime();
-        var filter = new FilterExpressionBuilder().eq("knowledge_base_id", knowledgeBaseId).build();
-        List<Document> retrieved = vectorStore.similaritySearch(SearchRequest.builder()
-                .query(question)
-                .topK(6)
-                .similarityThreshold(0.45)
-                .filterExpression(filter)
-                .build());
+        List<RetrievedHit> retrieved = retrieveAcrossBases(vectorStore, readyKnowledgeBaseIds, question);
         long retrievalDuration = elapsedMs(retrievalStartedAt);
         if (retrieved == null || retrieved.isEmpty()) {
             traces.add(trace("retrieval", "向量检索",
@@ -433,31 +465,39 @@ public class KnowledgeChatService {
         }
 
         traces.add(trace("retrieval", "向量检索",
-                "TopK=6，阈值=0.45；命中 " + retrieved.size() + " 个片段：" + describeHits(retrieved),
+                "每库 TopK=6，阈值=0.45；合并命中 " + retrieved.size() + " 个片段："
+                        + describeHits(retrieved.stream().map(RetrievedHit::document).toList()),
                 "completed", retrievalDuration));
 
         StringBuilder context = new StringBuilder();
         List<ChatCitation> citations = new ArrayList<>();
         Set<String> seenChunks = new HashSet<>();
-        for (Document document : retrieved) {
+        for (RetrievedHit hit : retrieved) {
+            Document document = hit.document();
             Map<String, Object> metadata = document.getMetadata();
+            String sourceKnowledgeBaseId = hit.knowledgeBaseId();
             String documentId = String.valueOf(metadata.getOrDefault("document_id", ""));
             String chunkId = String.valueOf(metadata.getOrDefault("chunk_id", ""));
             String fileName = String.valueOf(metadata.getOrDefault("file_name", "知识文档"));
             Integer pageNumber = parsePageNumber(metadata);
             String excerpt = excerpt(document.getText());
             String evidenceKey = chunkId.isBlank()
-                    ? documentId + ":" + pageNumber + ":" + Integer.toHexString(excerpt.hashCode())
-                    : chunkId;
+                    ? sourceKnowledgeBaseId + ":" + documentId + ":" + pageNumber + ":"
+                        + Integer.toHexString(excerpt.hashCode())
+                    : sourceKnowledgeBaseId + ":" + chunkId;
             if (!seenChunks.add(evidenceKey)) continue;
             int sourceNumber = citations.size() + 1;
             context.append("[资料 ").append(sourceNumber).append("] 来源：")
-                    .append(fileName);
+                    .append(fileName).append("（知识库：")
+                    .append(catalogRepository.findKnowledgeBase(sourceKnowledgeBaseId)
+                            .map(base -> base.getName()).orElse(sourceKnowledgeBaseId))
+                    .append("）");
             if (pageNumber != null) {
                 context.append("，第 ").append(pageNumber).append(" 页");
             }
             context.append("\n").append(document.getText()).append("\n\n");
             citations.add(ChatCitation.builder()
+                    .knowledgeBaseId(sourceKnowledgeBaseId)
                     .documentId(documentId)
                     .chunkId(chunkId)
                     .fileName(fileName)
@@ -479,9 +519,11 @@ public class KnowledgeChatService {
                 政策性结论只依据以上资料；订单、客户和工单事实只依据已授权工具的实际结果。资料或业务数据不足时请明确说明，不得编造。只回答用户当前问到的主题；不要因为检索到相邻主题就补充未被问到的政策、处理流程或业务状态。回答应简洁、准确，并在政策内容后用 [资料 N] 标注直接支持该结论的来源。只被检索到、却未支持该结论的资料不要标注；仅当多份资料分别提供必要依据时才并列标注。
                 """.formatted(scenarioInstruction, question, context);
 
+        boolean afterSalesEvidence = hasAfterSalesEvidence(question, retrieved);
+        if (!afterSalesEvidence) toolCallbacks = withoutPolicySensitiveTools(toolCallbacks);
         return new PreparedAnswer(chatClient, userPrompt, safeMedia, true, citations.size(),
                 citations, traces, toolCallbacks, trustedContext(actor, conversationId, requestId,
-                normalizedScenarioCode, true), chainStartedAt, null);
+                normalizedScenarioCode, afterSalesEvidence), chainStartedAt, null);
     }
 
     private AnswerResult completeSuccessfulAnswer(PreparedAnswer prepared,
@@ -525,6 +567,7 @@ public class KnowledgeChatService {
             CitationEvidenceSelector.Evidence evidence = CitationEvidenceSelector.select(
                     citation.getExcerpt(), question, answer, index + 1);
             focusedCitations.add(ChatCitation.builder()
+                    .knowledgeBaseId(citation.getKnowledgeBaseId())
                     .documentId(citation.getDocumentId()).chunkId(citation.getChunkId())
                     .fileName(citation.getFileName()).pageNumber(citation.getPageNumber())
                     .sectionTitle(evidence.sectionTitle()).excerpt(evidence.excerpt()).build());
@@ -538,6 +581,60 @@ public class KnowledgeChatService {
         return callbacks.stream()
                 .filter(callback -> !"checkAfterSalesEligibility".equals(callback.getName()))
                 .toList();
+    }
+
+    private static List<String> singleKnowledgeBase(String knowledgeBaseId) {
+        return knowledgeBaseId == null || knowledgeBaseId.isBlank()
+                ? List.of() : List.of(knowledgeBaseId);
+    }
+
+    /** Keep each library's own rank and interleave them so one large library cannot crowd out others. */
+    private List<RetrievedHit> retrieveAcrossBases(VectorStore vectorStore, List<String> baseIds,
+                                                   String question) {
+        List<List<RetrievedHit>> perBase = new ArrayList<>();
+        for (String baseId : baseIds) {
+            var filter = new FilterExpressionBuilder().eq("knowledge_base_id", baseId).build();
+            List<Document> documents = vectorStore.similaritySearch(SearchRequest.builder()
+                    .query(question).topK(6).similarityThreshold(0.45)
+                    .filterExpression(filter).build());
+            List<RetrievedHit> verified = new ArrayList<>();
+            if (documents != null) {
+                for (Document document : documents) {
+                    if (baseId.equals(String.valueOf(document.getMetadata().get("knowledge_base_id")))) {
+                        verified.add(new RetrievedHit(baseId, document));
+                    }
+                }
+            }
+            perBase.add(verified);
+        }
+        List<RetrievedHit> merged = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (int rank = 0; rank < 6 && merged.size() < 6; rank++) {
+            for (List<RetrievedHit> hits : perBase) {
+                if (rank >= hits.size()) continue;
+                RetrievedHit hit = hits.get(rank);
+                String chunkId = String.valueOf(hit.document().getMetadata().getOrDefault("chunk_id", ""));
+                String key = hit.knowledgeBaseId() + ":" +
+                        (chunkId.isBlank() ? hit.document().getId() : chunkId);
+                if (seen.add(key)) merged.add(hit);
+                if (merged.size() == 6) break;
+            }
+        }
+        return merged;
+    }
+
+    private boolean hasAfterSalesEvidence(String question, List<RetrievedHit> hits) {
+        if (!isAfterSalesText(question)) return false;
+        return hits.stream().anyMatch(hit -> isAfterSalesText(hit.document().getText()));
+    }
+
+    private boolean isAfterSalesText(String value) {
+        if (value == null) return false;
+        return List.of("售后", "退货", "退款", "换货", "退换", "七日无理由", "保修")
+                .stream().anyMatch(value::contains);
+    }
+
+    private record RetrievedHit(String knowledgeBaseId, Document document) {
     }
 
     private Map<String, Object> trustedContext(AuthenticatedUser actor,

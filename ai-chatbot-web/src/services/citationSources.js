@@ -15,11 +15,12 @@ export function groupCitations(citations = [], answer = '') {
   citations.forEach((citation, index) => {
     if (!citation || (cited.size && !cited.has(index + 1))) return
     const documentId = String(citation.documentId || '').trim()
+    const knowledgeBaseId = String(citation.knowledgeBaseId || '').trim()
     const fileName = String(citation.fileName || '知识文档').trim()
-    const key = documentId ? `id:${documentId}` : `name:${fileName}`
+    const key = documentId ? `base:${knowledgeBaseId}:id:${documentId}` : `base:${knowledgeBaseId}:name:${fileName}`
     let group = byDocument.get(key)
     if (!group) {
-      group = { key, documentId, fileName, snippets: [] }
+      group = { key, documentId, knowledgeBaseId, fileName, snippets: [] }
       byDocument.set(key, group)
       groups.push(group)
     }

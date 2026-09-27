@@ -84,6 +84,7 @@ class ConversationControllerStreamingTest {
                 attachmentService,
                 mock(ConversationTitleService.class),
                 mock(com.chatbot.ai.service.WidgetAssistantService.class),
+                mock(com.chatbot.ai.service.ScenarioService.class),
                 mock(com.chatbot.ai.repository.KnowledgeChunkRepository.class),
                 chatMemory);
         mockMvc = MockMvcBuilders.standaloneSetup(controller)
@@ -117,7 +118,7 @@ class ConversationControllerStreamingTest {
                 .build();
         KnowledgeChatService.AnswerResult answer = new KnowledgeChatService.AnswerResult(
                 "您好，可以处理。", List.of(citation), List.of(trace));
-        when(knowledgeChatService.streamAnswer(eq("conversation-1"), isNull(), eq("general"),
+        when(knowledgeChatService.streamAnswerWithKnowledgeBases(eq("conversation-1"), eq(List.of()), eq("general"),
                 eq("可以处理吗"), anyList(), eq(ACTOR), eq("request-1234")))
                 .thenReturn(Flux.just(
                         new KnowledgeChatService.AnswerDelta("您好，"),
@@ -177,7 +178,7 @@ class ConversationControllerStreamingTest {
                 .thenReturn(List.of(image));
         Path imagePath = Files.write(tempDirectory.resolve("test-image.png"), new byte[]{1, 2, 3});
         when(attachmentService.resolve(image)).thenReturn(imagePath);
-        when(knowledgeChatService.streamAnswer(eq("conversation-1"), isNull(), eq("general"),
+        when(knowledgeChatService.streamAnswerWithKnowledgeBases(eq("conversation-1"), eq(List.of()), eq("general"),
                 eq("请分析这张图"), anyList(), eq(ACTOR), eq("request-1234")))
                 .thenReturn(Flux.just(new KnowledgeChatService.AnswerCompleted(answer)));
         when(conversationRepository.appendExchange(eq("conversation-1"), any(), any()))
@@ -196,7 +197,7 @@ class ConversationControllerStreamingTest {
                 .andExpect(content().string(containsString("event:complete")));
 
         ArgumentCaptor<List<Media>> mediaCaptor = (ArgumentCaptor) ArgumentCaptor.forClass(List.class);
-        verify(knowledgeChatService).streamAnswer(eq("conversation-1"), isNull(), eq("general"),
+        verify(knowledgeChatService).streamAnswerWithKnowledgeBases(eq("conversation-1"), eq(List.of()), eq("general"),
                 eq("请分析这张图"), mediaCaptor.capture(), eq(ACTOR), eq("request-1234"));
         assertThat(mediaCaptor.getValue()).hasSize(1);
         assertThat(mediaCaptor.getValue().get(0).getName()).isEqualTo("diagram.png");
@@ -217,7 +218,7 @@ class ConversationControllerStreamingTest {
         when(attachmentService.findOwned("conversation-1", List.of("image-1"))).thenReturn(List.of(image));
         Path imagePath = Files.write(tempDirectory.resolve("original.png"), new byte[]{1, 2, 3});
         when(attachmentService.resolve(image)).thenReturn(imagePath);
-        when(knowledgeChatService.streamAnswer(eq("conversation-1"), isNull(), eq("general"),
+        when(knowledgeChatService.streamAnswerWithKnowledgeBases(eq("conversation-1"), eq(List.of()), eq("general"),
                 eq("修改后的问题"), anyList(), eq(ACTOR), eq("request-1234")))
                 .thenReturn(Flux.just(
                         new KnowledgeChatService.AnswerDelta("新回"),
@@ -249,7 +250,7 @@ class ConversationControllerStreamingTest {
 
     @Test
     void turnsGenerationFailureIntoTerminalErrorEventWithoutPersistingPartialExchange() throws Exception {
-        when(knowledgeChatService.streamAnswer(eq("conversation-1"), isNull(), eq("general"),
+        when(knowledgeChatService.streamAnswerWithKnowledgeBases(eq("conversation-1"), eq(List.of()), eq("general"),
                 eq("测试异常"), anyList(), eq(ACTOR), eq("request-1234")))
                 .thenReturn(Flux.error(new ResponseStatusException(
                         HttpStatus.SERVICE_UNAVAILABLE, "模型服务暂不可用")));
@@ -300,7 +301,7 @@ class ConversationControllerStreamingTest {
         session.setMessages(new ArrayList<>(List.of(
                 ChatMessageEntry.builder().role("user").content("原问题").createdAt(Instant.now()).build(),
                 ChatMessageEntry.builder().role("assistant").content("原回答").createdAt(Instant.now()).build())));
-        when(knowledgeChatService.streamAnswer(eq("conversation-1"), isNull(), eq("general"),
+        when(knowledgeChatService.streamAnswerWithKnowledgeBases(eq("conversation-1"), eq(List.of()), eq("general"),
                 eq("修改后的问题"), anyList(), eq(ACTOR), eq("request-1234")))
                 .thenReturn(Flux.error(new IllegalStateException("模型断开")));
 

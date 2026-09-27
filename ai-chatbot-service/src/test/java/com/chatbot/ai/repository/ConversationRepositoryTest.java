@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -16,6 +17,27 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ConversationRepositoryTest {
     @TempDir
     Path temporaryDirectory;
+
+    @Test
+    void readsLegacySingleBaseAndFiltersNewMultiBaseByAnySelectedId() throws Exception {
+        Files.writeString(temporaryDirectory.resolve("conversations.json"), """
+                [{"id":"legacy","knowledgeBaseId":"kb-old","scenarioCode":"general",
+                  "title":"旧会话","createdAt":"2026-01-01T00:00:00Z",
+                  "updatedAt":"2026-01-01T00:00:00Z","messages":[]}]
+                """);
+        ConversationRepository repository = repository();
+        assertThat(repository.findById("legacy").orElseThrow().getKnowledgeBaseIds())
+                .containsExactly("kb-old");
+
+        ConversationSession multi = newSession("multi", "新会话");
+        multi.setKnowledgeBaseId("kb-a");
+        multi.setKnowledgeBaseIds(java.util.List.of("kb-a", "kb-b"));
+        repository.save(multi);
+        assertThat(repository.findByKnowledgeBaseId("kb-b"))
+                .extracting(ConversationSession::getId).containsExactly("multi");
+        assertThat(repository.findByKnowledgeBaseId("kb-old"))
+                .extracting(ConversationSession::getId).containsExactly("legacy");
+    }
 
     @Test
     void claimsAutoTitleOnlyForFirstUserQuestionOfDefaultConversation() throws Exception {

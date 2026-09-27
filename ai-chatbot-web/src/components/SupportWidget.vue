@@ -16,6 +16,7 @@ import {
 import PendingActionCard from './PendingActionCard.vue'
 import CitationSources from './CitationSources.vue'
 import { citationPresentation } from '../services/citationSources'
+import { isWidgetKnowledgeSession } from '../services/knowledgeSelection'
 import { BASE_URL, conversationAPI, createRequestId, pendingActionAPI } from '../services/api'
 import { authState } from '../services/auth'
 
@@ -68,8 +69,7 @@ const launcherStyle = computed(() => launcherPosition.value
   ? { left: launcherPosition.value.left + 'px', top: launcherPosition.value.top + 'px', right: 'auto', bottom: 'auto' }
   : undefined)
 const supportSessions = computed(() => recentSessions.value.filter(item =>
-  item.scenarioCode === 'knowledge-research'
-    && item.knowledgeBaseId === assistantContext.value?.knowledgeBaseId
+  isWidgetKnowledgeSession(item, assistantContext.value?.knowledgeBaseId)
 ).slice(0, 8))
 const assistantReady = computed(() => assistantContext.value?.available === true)
 
@@ -467,9 +467,7 @@ async function restoreSession() {
   try {
     const session = await conversationAPI.get(requestedId)
     if (requestVersion !== sessionLoadVersion || currentConversationId.value !== requestedId) return
-    if (session.scenarioCode !== 'knowledge-research'
-        || (assistantContext.value?.knowledgeBaseId
-          && session.knowledgeBaseId !== assistantContext.value.knowledgeBaseId)) {
+    if (!isWidgetKnowledgeSession(session, assistantContext.value?.knowledgeBaseId)) {
       setConversationId('')
       messages.value = []
       initialized.value = true
@@ -600,6 +598,10 @@ async function selectConversation(id) {
   try {
     const session = await conversationAPI.get(id)
     if (requestVersion !== sessionLoadVersion) return
+    if (!isWidgetKnowledgeSession(session, assistantContext.value?.knowledgeBaseId)) {
+      notice.value = '该会话不属于产品助手，请在会话中心查看。'
+      return
+    }
     setConversationId(session.id)
     messages.value = session.messages || []
     mergePendingActions(session.pendingActions)
@@ -962,7 +964,7 @@ onBeforeUnmount(() => {
                   </div>
                   <details v-if="message.citations?.length" class="support-widget-citations">
                     <summary>{{ citationSummary(message) }}</summary>
-                    <CitationSources :citations="message.citations" :answer="message.content" :knowledge-base-id="assistantContext?.knowledgeBaseId || ''" compact :show-heading="false" />
+                    <CitationSources :citations="message.citations" :answer="message.content" :knowledge-base-id="assistantContext?.knowledgeBaseId || ''" :knowledge-bases="assistantContext?.knowledgeBaseId ? [{ id: assistantContext.knowledgeBaseId, name: assistantContext.knowledgeBaseName }] : []" compact :show-heading="false" />
                   </details>
                 </template>
                 <div v-if="message.attachments?.length" class="support-widget-message-attachments">

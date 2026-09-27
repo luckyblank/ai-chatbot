@@ -2,6 +2,7 @@ package com.chatbot.ai.service;
 
 import com.chatbot.ai.domain.auth.AuthenticatedUser;
 import com.chatbot.ai.domain.knowledge.DocumentStatus;
+import com.chatbot.ai.domain.knowledge.KnowledgeBase;
 import com.chatbot.ai.domain.knowledge.KnowledgeDocument;
 import com.chatbot.ai.domain.scenario.ScenarioDefinition;
 import com.chatbot.ai.repository.KnowledgeCatalogRepository;
@@ -46,6 +47,8 @@ class KnowledgeChatServiceNoEvidenceTest {
                 .name("电商售后").knowledgeMode("推荐").tools(List.of("订单履约查询", "售后资格校验"))
                 .process(List.of()).guardrail("政策不足时转人工").build();
         when(scenarios.findByCode("commerce-support")).thenReturn(Optional.of(scenario));
+        when(catalog.findKnowledgeBase("kb-1"))
+                .thenReturn(Optional.of(KnowledgeBase.builder().id("kb-1").build()));
         when(catalog.findDocuments("kb-1")).thenReturn(List.of(
                 KnowledgeDocument.builder().id("doc-1").status(DocumentStatus.READY).build()));
         when(vectorStore.similaritySearch(any(SearchRequest.class))).thenReturn(List.of());
@@ -96,6 +99,8 @@ class KnowledgeChatServiceNoEvidenceTest {
                 .name("电商售后").knowledgeMode("推荐").tools(List.of("订单履约查询", "售后资格校验"))
                 .process(List.of()).guardrail("政策不足时转人工").build();
         when(scenarios.findByCode("commerce-support")).thenReturn(Optional.of(scenario));
+        when(catalog.findKnowledgeBase("kb-empty"))
+                .thenReturn(Optional.of(KnowledgeBase.builder().id("kb-empty").build()));
         when(catalog.findDocuments("kb-empty")).thenReturn(List.of());
         when(policy.allowedCallbacks(scenario)).thenReturn(List.of(queryOrder, eligibility));
         when(chatClient.prompt()).thenReturn(spec);

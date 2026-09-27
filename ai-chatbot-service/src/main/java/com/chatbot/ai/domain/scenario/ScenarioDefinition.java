@@ -19,6 +19,11 @@ public class ScenarioDefinition {
     private String shortName;
     private String summary;
     private String knowledgeMode;
+    /** Empty means all knowledge bases available to the operator. */
+    @Builder.Default
+    private List<String> allowedKnowledgeBaseIds = new ArrayList<>();
+    @Builder.Default
+    private List<String> defaultKnowledgeBaseIds = new ArrayList<>();
     @Builder.Default
     private List<String> tools = new ArrayList<>();
     @Builder.Default

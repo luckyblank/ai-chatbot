@@ -11,6 +11,34 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class ScenarioRepositoryMigrationTest {
     @Test
+    void addsKnowledgeScopeColumnsToExistingTableOnlyOnce() {
+        var dataSource = new DriverManagerDataSource(
+                "jdbc:h2:mem:scenario-knowledge-scope-migration;MODE=MySQL;DB_CLOSE_DELAY=-1", "sa", "");
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        jdbc.execute("""
+                CREATE TABLE ai_scenario (
+                  code VARCHAR(80) PRIMARY KEY, name VARCHAR(100) NOT NULL,
+                  short_name VARCHAR(40) NOT NULL, summary VARCHAR(500) NOT NULL,
+                  knowledge_mode VARCHAR(20) NOT NULL, tools_json LONGTEXT NOT NULL,
+                  process_json LONGTEXT NOT NULL, guardrail VARCHAR(1000) NOT NULL,
+                  sort_order INT NOT NULL, updated_at TIMESTAMP NOT NULL
+                )
+                """);
+        ScenarioRepository scenarios = new ScenarioRepository(jdbc, new ObjectMapper());
+        scenarios.initialize();
+        scenarios.initialize();
+
+        var general = scenarios.findByCode("general").orElseThrow();
+        assertThat(general.getAllowedKnowledgeBaseIds()).isEmpty();
+        assertThat(general.getDefaultKnowledgeBaseIds()).isEmpty();
+        general.setAllowedKnowledgeBaseIds(List.of("kb-a", "kb-b"));
+        general.setDefaultKnowledgeBaseIds(List.of("kb-a"));
+        scenarios.save(general);
+        assertThat(scenarios.findByCode("general").orElseThrow().getDefaultKnowledgeBaseIds())
+                .containsExactly("kb-a");
+    }
+
+    @Test
     void upgradesOnlyUntouchedGeneralDefaultSteps() {
         var dataSource = new DriverManagerDataSource(
                 "jdbc:h2:mem:scenario-general-migration;MODE=MySQL;DB_CLOSE_DELAY=-1", "sa", "");

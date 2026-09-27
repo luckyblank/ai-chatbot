@@ -1,6 +1,7 @@
 package com.chatbot.ai.service;
 
 import com.chatbot.ai.domain.scenario.ScenarioDefinition;
+import com.chatbot.ai.domain.knowledge.KnowledgeBase;
 import com.chatbot.ai.domain.vo.UpdateScenarioRequest;
 import com.chatbot.ai.repository.ScenarioRepository;
 import org.junit.jupiter.api.Test;
@@ -20,6 +21,26 @@ import static org.mockito.Mockito.when;
 
 class ScenarioServiceTest {
     @Test
+    void rejectsDefaultBaseOutsideAllowedScopeBeforeSaving() {
+        ScenarioRepository repository = mock(ScenarioRepository.class);
+        KnowledgeBaseService bases = mock(KnowledgeBaseService.class);
+        ScenarioDefinition scenario = ScenarioDefinition.builder().code("general").name("旧名称").build();
+        when(repository.findByCode("general")).thenReturn(Optional.of(scenario));
+        when(bases.getKnowledgeBase(any())).thenAnswer(invocation ->
+                KnowledgeBase.builder().id(invocation.getArgument(0)).build());
+        UpdateScenarioRequest request = new UpdateScenarioRequest("新名称", "新简称", "说明", "可选",
+                List.of(), List.of("理解任务"), "遵守约束", List.of("kb-a"), List.of("kb-b"));
+
+        assertThatThrownBy(() -> new ScenarioService(repository, bases).update("general", request))
+                .isInstanceOfSatisfying(ResponseStatusException.class, exception -> {
+                    assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(exception.getReason()).contains("可用范围");
+                });
+        assertThat(scenario.getName()).isEqualTo("旧名称");
+        verify(repository, never()).save(any());
+    }
+
+    @Test
     void acceptsStableIdsAndLegacyLabelsButPersistsOnlyStableIds() {
         ScenarioRepository repository = mock(ScenarioRepository.class);
         ScenarioDefinition scenario = ScenarioDefinition.builder().code("commerce-support")
@@ -27,7 +48,7 @@ class ScenarioServiceTest {
         when(repository.findByCode("commerce-support")).thenReturn(Optional.of(scenario));
         when(repository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
 
-        ScenarioDefinition updated = new ScenarioService(repository).update("commerce-support",
+        ScenarioDefinition updated = new ScenarioService(repository, mock(KnowledgeBaseService.class)).update("commerce-support",
                 request(List.of(" customer-orders ", "客户订单查询", "创建服务工单")));
 
         assertThat(updated.getTools()).containsExactly("customer-orders", "prepare-service-ticket");
@@ -41,7 +62,7 @@ class ScenarioServiceTest {
                 .name("原名称").tools(List.of("历史未知工具")).build();
         when(repository.findByCode("general")).thenReturn(Optional.of(scenario));
 
-        assertThatThrownBy(() -> new ScenarioService(repository).update("general",
+        assertThatThrownBy(() -> new ScenarioService(repository, mock(KnowledgeBaseService.class)).update("general",
                 request(List.of("customer-orders", "历史未知工具"))))
                 .isInstanceOfSatisfying(ResponseStatusException.class, exception -> {
                     assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
@@ -61,7 +82,7 @@ class ScenarioServiceTest {
 
         UpdateScenarioRequest request = new UpdateScenarioRequest("新名称", "新简称", "说明", "可选",
                 List.of(), List.of("理解任务", " 理解任务 "), "遵守约束");
-        assertThatThrownBy(() -> new ScenarioService(repository).update("general", request))
+        assertThatThrownBy(() -> new ScenarioService(repository, mock(KnowledgeBaseService.class)).update("general", request))
                 .isInstanceOfSatisfying(ResponseStatusException.class, exception -> {
                     assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
                     assertThat(exception.getReason()).contains("重复");
